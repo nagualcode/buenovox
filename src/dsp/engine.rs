@@ -12,7 +12,7 @@
 use super::brain::{Brain, BrainParams, CtrlFrame};
 use super::marks::MarkTracker;
 use super::pitch::{PitchTracker, F0_MIN};
-use super::psola::{max_half_len, GrainVoice, VoiceControl, VoiceState};
+use super::psola::{max_half_len, GrainVoice, VoiceControl, VoiceState, FORMANT_MIN, LIVE_MAX_HALF};
 use super::tonal::{Ctx, Source};
 use super::util::{HannTable, Ring};
 
@@ -22,6 +22,9 @@ const CTX_CAP: usize = 1024;
 /// Compromisso latencia x conhecimento da nota.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum LatencyMode {
+    /// Para cantar ao vivo: < 20 ms. O audio nao espera o detector (as decisoes de nota chegam
+    /// ~30 ms depois do som; o ciclo a ciclo vem das marcas previstas).
+    Live,
     /// Para gravar com monitoracao: lookahead curto.
     Track,
     /// Para mixar: o cerebro ve ~190 ms a frente (a nota quase inteira).
@@ -30,22 +33,33 @@ pub enum LatencyMode {
 }
 
 impl LatencyMode {
-    pub fn from_index(i: usize) -> Self { if i == 0 { Self::Track } else { Self::Studio } }
+    pub fn from_index(i: usize) -> Self {
+        match i {
+            0 => Self::Live,
+            1 => Self::Track,
+            _ => Self::Studio,
+        }
+    }
 
     pub fn index(self) -> usize {
         match self {
-            Self::Track => 0,
-            Self::Studio => 1,
+            Self::Live => 0,
+            Self::Track => 1,
+            Self::Studio => 2,
         }
     }
 
     fn lookahead_s(self) -> f64 {
         match self {
+            Self::Live => 0.0,
             Self::Track => 0.008,
             Self::Studio => 0.19,
         }
     }
 }
+
+/// Latencia do modo ao vivo (s).
+pub const LIVE_LATENCY: f64 = 0.018;
 
 /// Parametros do motor (lidos do host a cada bloco).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -125,7 +139,18 @@ impl Engine {
         let half = max_half_len(sr);
         let need_marks = lag + period + half;
         let need_ctrl = lag + half + lookahead + hop as f64;
-        let latency = (need_marks.max(need_ctrl) + 2.0 * hop as f64 + 0.5 * period + 64.0).ceil() as usize;
+        let live = mode == LatencyMode::Live;
+        let latency = if live {
+            (LIVE_LATENCY * sr as f64).round() as usize
+        } else {
+            (need_marks.max(need_ctrl) + 2.0 * hop as f64 + 0.5 * period + 64.0).ceil() as usize
+        };
+        let mut marks = MarkTracker::new(sr);
+        marks.live = live;
+        let mut voice = GrainVoice::new();
+        if live {
+            voice.max_half = LIVE_MAX_HALF * sr as f64;
+        }
         Self {
             sr,
             mode,
@@ -136,7 +161,7 @@ impl Engine {
             dry_l: Ring::new(1 << 16),
             dry_r: Ring::new(1 << 16),
             pitch,
-            marks: MarkTracker::new(sr),
+            marks,
             hann: HannTable::new(),
             n_in: 0,
             mono: vec![0.0; 1024],
@@ -149,7 +174,7 @@ impl Engine {
             frames: vec![CtrlFrame::default(); CTRL_CAP],
             frame_count: 0,
             brain: Brain::new(sr, hop, lookahead),
-            voice: GrainVoice::new(),
+            voice,
             wet: 1.0,
             starved_ctrl: std::cell::Cell::new(0),
             meter: CtrlFrame::default(),
@@ -166,9 +191,6 @@ impl Engine {
 
     /// Quantas vezes o motor precisou de informacao que ainda nao existia (deve ser 0).
     pub fn starved(&self) -> u64 { self.starved_ctrl.get() + self.voice.starved }
-
-    /// Diagnostico do PSOLA: (inicios vozeados, travados na marca, passos estimados).
-    pub fn psola_debug(&self) -> (u64, u64, u64) { (self.voice.dbg_onsets, self.voice.dbg_snaps, self.voice.dbg_unknown) }
 
     fn ctx_now(&self) -> Ctx {
         let p = &self.params;
@@ -296,7 +318,7 @@ impl Engine {
 
         // graos
         let tau_end = (n0 + n as i64 - lat) as f64;
-        let until = tau_end + max_half_len(self.sr);
+        let until = tau_end + self.plan_ahead();
         let mut voice = std::mem::take(&mut self.voice);
         voice.plan(until, &self.input, &self.marks, &Ctl { e: self }, &self.hann);
         self.voice = voice;
@@ -323,6 +345,15 @@ impl Engine {
 
     pub fn frame_count(&self) -> u64 { self.frame_count }
 
+    /// Quanto alem da saida os graos precisam ser planejados (a maior meia janela de saida).
+    fn plan_ahead(&self) -> f64 {
+        if self.mode == LatencyMode::Live {
+            self.voice.max_half / FORMANT_MIN as f64 + 4.0
+        } else {
+            max_half_len(self.sr)
+        }
+    }
+
     fn frame_at(&self, t: f64) -> CtrlFrame {
         if self.frame_count == 0 {
             return CtrlFrame::default();
@@ -340,7 +371,8 @@ impl Engine {
         }
         let x = (t / self.hop as f64).max(0.0);
         let last = self.frame_count - 1;
-        if x > last as f64 + 1.0 && t > self.hop as f64 * 8.0 {
+        // ao vivo o audio passa a frente das decisoes: vale a ultima (nao e fome)
+        if x > last as f64 + 1.0 && t > self.hop as f64 * 8.0 && self.mode != LatencyMode::Live {
             self.starved_ctrl.set(self.starved_ctrl.get() + 1);
         }
         let oldest = self.frame_count.saturating_sub(CTRL_CAP as u64 - 4);
@@ -369,9 +401,14 @@ struct Ctl<'a> {
 }
 
 impl VoiceControl for Ctl<'_> {
-    fn state(&self, s: f64) -> VoiceState {
-        let shift = self.e.shift_at(s);
-        VoiceState { ratio: (shift / 12.0).exp2(), formant: (self.e.params.throat * 0.3).exp2() }
+    fn state(&self, s: f64, src_period: f32) -> VoiceState {
+        let formant = (self.e.params.throat * 0.3).exp2();
+        let hard = self.e.frame_at(s).hard_hz;
+        if hard > 0.0 && src_period > 0.0 && !self.e.params.bypass {
+            // alvo absoluto: o ciclo sai exatamente no periodo da nota
+            return VoiceState { ratio: hard * src_period / self.e.sr, formant };
+        }
+        VoiceState { ratio: (self.e.shift_at(s) / 12.0).exp2(), formant }
     }
 }
 

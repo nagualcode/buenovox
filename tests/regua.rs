@@ -195,6 +195,76 @@ fn natural_track_mode() {
 }
 
 #[test]
+fn natural_live_mode() {
+    let r = phrase(35.0, 40.0);
+    let (out, starved) = run(&r.audio, SR, LatencyMode::Live, &c_major(), 128, &no_midi);
+    assert_eq!(starved, 0);
+    let rep = report(&r, &out, SR);
+    print("Natural / Live", &rep);
+    for n in &rep {
+        assert!(n.center_err.abs() < 8.0, "nota {} centro {}", n.intended, n.center_err);
+        assert!(n.expr_err < 8.0, "nota {} expressao {}", n.intended, n.expr_err);
+    }
+}
+
+#[test]
+fn hard_live_mode() {
+    let r = phrase(35.0, 40.0);
+    let mut p = c_major();
+    p.brain.style = Style::Hard;
+    let (out, _) = run(&r.audio, SR, LatencyMode::Live, &p, 128, &no_midi);
+    let rep = report(&r, &out, SR);
+    print("Hard / Live", &rep);
+    for n in &rep {
+        assert!(n.center_err.abs() < 6.0, "nota {} centro {}", n.intended, n.center_err);
+        assert!(n.out_std < 6.0, "nota {} ainda oscila {}", n.intended, n.out_std);
+    }
+}
+
+#[test]
+fn live_latency_under_20ms() {
+    for &sr in &[44_100.0f32, 48_000.0, 96_000.0] {
+        let e = Engine::new(sr, LatencyMode::Live);
+        let ms = e.latency() as f32 * 1000.0 / sr;
+        println!("ao vivo a {sr} Hz: {ms:.1} ms");
+        assert!(ms < 20.0);
+    }
+}
+
+#[test]
+fn live_identity_and_low_voices() {
+    // sem correcao, o modo ao vivo continua transparente; e uma voz grave (A2, 110 Hz, grao
+    // limitado a 5 ms) sai afinada e sem perder energia
+    let r = phrase(0.0, 40.0);
+    let mut p = c_major();
+    p.brain.amount = 0.0;
+    let (out, _) = run(&r.audio, SR, LatencyMode::Live, &p, 128, &no_midi);
+    let (mut se, mut ss) = (0.0f64, 0.0f64);
+    for (o, i) in out.iter().zip(&r.audio).skip(12000) {
+        se += ((o - i) as f64).powi(2);
+        ss += (*i as f64).powi(2);
+    }
+    let snr = 10.0 * (ss / se.max(1e-20)).log10();
+    println!("ao vivo sem correcao: SNR {snr:.1} dB");
+    assert!(snr > 30.0, "{snr}");
+
+    let notes = vec![SungNote::new(45.0, 30.0, 1.2).vibrato(5.5, 30.0), SungNote::new(47.0, -30.0, 1.2)];
+    let r = render(&SingerSpec::new(SR, notes));
+    let (out, starved) = run(&r.audio, SR, LatencyMode::Live, &c_major(), 128, &no_midi);
+    assert_eq!(starved, 0);
+    let rep = report(&r, &out, SR);
+    print("Natural / Live, voz grave", &rep);
+    let e_in: f32 = r.audio.iter().map(|x| x * x).sum();
+    let e_out: f32 = out.iter().map(|x| x * x).sum();
+    let ratio_db = 10.0 * (e_out / e_in).log10();
+    println!("energia saida/entrada: {ratio_db:+.2} dB");
+    assert!(ratio_db.abs() < 1.5);
+    for n in &rep {
+        assert!(n.center_err.abs() < 8.0, "nota {} centro {}", n.intended, n.center_err);
+    }
+}
+
+#[test]
 fn hard_flattens_everything() {
     let r = phrase(35.0, 40.0);
     let mut p = c_major();
@@ -336,7 +406,7 @@ fn never_starves_at_common_rates() {
     for &sr in &[44_100.0f32, 48_000.0, 96_000.0] {
         let notes = vec![SungNote::new(45.0, 20.0, 0.8).vibrato(5.5, 50.0), SungNote::new(76.0, -20.0, 0.8)];
         let r = render(&SingerSpec::new(sr, notes));
-        for mode in [LatencyMode::Track, LatencyMode::Studio] {
+        for mode in [LatencyMode::Live, LatencyMode::Track, LatencyMode::Studio] {
             let (_, starved) = run(&r.audio, sr, mode, &c_major(), 333, &no_midi);
             assert_eq!(starved, 0, "fome em {sr} Hz, {mode:?}");
         }

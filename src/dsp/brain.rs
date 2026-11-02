@@ -100,12 +100,15 @@ pub struct CtrlFrame {
     pub target: f32,
     /// Extensao do vibrato do cantor (cents RMS).
     pub vib_cents: f32,
+    /// Alvo absoluto (Hz) do estilo Hard; 0 = deslocamento relativo. O PSOLA divide pelo
+    /// periodo real de cada ciclo: a escada do Hard nao depende do atraso do detector.
+    pub hard_hz: f32,
     /// Diagnostico: centro da nota, centro local, ancora.
     pub dbg: [f32; 3],
 }
 
 impl Default for CtrlFrame {
-    fn default() -> Self { Self { shift: 0.0, input: 0.0, output: 0.0, target: f32::NAN, vib_cents: 0.0, dbg: [0.0; 3] } }
+    fn default() -> Self { Self { shift: 0.0, input: 0.0, output: 0.0, target: f32::NAN, vib_cents: 0.0, hard_hz: 0.0, dbg: [0.0; 3] } }
 }
 
 /// Duracao da janela do centro local (s): ~2 ciclos de vibrato.
@@ -540,6 +543,7 @@ impl Brain {
             output: pm + shift,
             target: tf,
             vib_cents: 100.0 * self.vib_ms.sqrt(),
+            hard_hz: if p.style == Style::Hard && p.amount >= 1.0 { a4 * ((tf - 69.0) / 12.0).exp2() } else { 0.0 },
             dbg: [cn, c_loc, anchor],
         }
     }

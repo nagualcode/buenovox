@@ -28,6 +28,8 @@ pub struct MarkTracker {
     pub uv_hop: f32,
     last: Mark,
     started: bool,
+    /// Modo ao vivo: marcas alem do ultimo quadro do detector.
+    pub live: bool,
 }
 
 impl MarkTracker {
@@ -39,6 +41,7 @@ impl MarkTracker {
             uv_hop,
             last: Mark { pos: 0.0, period: uv_hop, voiced: false, weak: false },
             started: false,
+            live: false,
         }
     }
 
@@ -54,6 +57,12 @@ impl MarkTracker {
 
     /// Gera marcas enquanto houver sinal e quadros de altura suficientes.
     /// `avail` = numero de amostras ja escritas em `pt.filtered`.
+    ///
+    /// No modo ao vivo (`live`) as marcas nao esperam o detector (que chega ~30 ms atrasado):
+    /// alem do ultimo quadro de altura, o proximo ciclo e previsto pelo espacamento real da marca
+    /// anterior e confirmado pela correlacao com o ciclo anterior, que so precisa de ~0,7 periodo
+    /// de sinal a frente. Sem correlacao (consoante, fim da nota) o trecho vozeado termina ali.
+    /// Inicios de nota so comecam quando o detector confirma o vozeamento.
     pub fn update(&mut self, pt: &PitchTracker, avail: i64) {
         let x = &pt.filtered;
         if !self.started {
@@ -66,20 +75,25 @@ impl MarkTracker {
             let guess = last.pos + step;
             // precisamos de quadros de altura que cubram o proximo ciclo e de sinal para a busca
             // (meio ciclo de folga basta: a latencia minima do motor depende disso)
-            if pt.latest_time() < guess + 0.5 * step {
+            let ready = pt.latest_time() >= guess + 0.5 * step;
+            if !ready && !self.live {
                 break;
             }
-            let fr = pt.at(guess);
+            let fr = if ready { pt.at(guess) } else { pt.at(pt.latest_time()) };
             // continuacao fraca: so prolonga um trecho vozeado, nunca inicia um
             let weak = !fr.voiced() && last.voiced && fr.f0_weak > 0.0;
             if fr.voiced() || weak {
-                let p = pt.sr() / if weak { fr.f0_weak } else { fr.f0 };
-                let need = guess + 1.3 * p as f64 + 2.0;
+                let p_det = pt.sr() / if weak { fr.f0_weak } else { fr.f0 };
+                // alem do detector, o espacamento real da marca anterior e mais atual que ele
+                let extrapolating = !ready && last.voiced;
+                let p = if extrapolating { last.period } else { p_det };
+                let ahead = if !last.voiced { 1.0 } else if self.live { 0.7 } else { 1.3 };
+                let need = guess + ahead * p as f64 + 2.0;
                 if need as i64 >= avail {
                     break;
                 }
                 let tracked = if last.voiced && (p - last.period).abs() < 0.35 * p { refine_ncc(x, last.pos, guess, p) } else { None };
-                if weak && tracked.is_none() {
+                if (weak || (self.live && last.voiced)) && tracked.is_none() {
                     self.push(Mark { pos: guess, period: self.uv_hop, voiced: false, weak: false });
                     continue;
                 }
@@ -99,7 +113,14 @@ impl MarkTracker {
                     best as f64
                 });
                 let pos = pos.max(last.pos + 0.5 * p as f64);
-                self.push(Mark { pos, period: p, voiced: true, weak });
+                // ao vivo o periodo da marca e o espacamento real (segue glides sem o detector)
+                let period = if self.live && tracked.is_some() {
+                    let sp = (pos - last.pos) as f32;
+                    if (sp / p - 1.0).abs() < 0.25 { sp } else { p }
+                } else {
+                    p
+                };
+                self.push(Mark { pos, period, voiced: true, weak });
             } else {
                 if guess as i64 + 2 >= avail {
                     break;

@@ -335,15 +335,20 @@ impl BuenoGui {
         ui.add_space(4.0);
         caption(ui, "LATENCY");
         let w = ui.available_width();
-        self.grid(ui, state, P::Latency.into(), &["TRACK", "STUDIO"], 2, w, 20.0, ACCENT);
+        self.grid(ui, state, P::Latency.into(), &["LIVE", "TRACK", "STUDIO"], 3, w, 20.0, ACCENT);
         let chosen = state.params().latency.index() as usize;
         let active = (state.get_meter(P::MeterMode).round() as usize).checked_sub(1).unwrap_or(chosen);
         if active != chosen {
             hint(ui, "Restart playback or reload to apply.");
-        } else if active == 0 {
-            hint(ui, "Track: for recording with monitoring.");
         } else {
-            hint(ui, "Studio: sees each note before tuning it.");
+            hint(
+                ui,
+                match active {
+                    0 => "Live: 18 ms, for singing on stage.",
+                    1 => "Track: for recording with monitoring.",
+                    _ => "Studio: sees each note before tuning it.",
+                },
+            );
         }
     }
 }

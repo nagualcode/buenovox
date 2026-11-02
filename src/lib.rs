@@ -61,8 +61,9 @@ pub mod truce_integration {
 
     #[derive(ParamEnum, Debug)]
     pub enum LatencyChoice {
-        #[name = "Track"] V0,
-        #[name = "Studio"] V1,
+        #[name = "Live"] V0,
+        #[name = "Track"] V1,
+        #[name = "Studio"] V2,
     }
 
     #[derive(Params)]
@@ -83,7 +84,7 @@ pub mod truce_integration {
         #[param(name = "Pure Tuning", default = false)] pub pure: BoolParam,
         #[param(name = "A4", range = "linear(415, 466)", default = 440.0, unit = "Hz")] pub a4: FloatParam,
         #[param(name = "Bend Range", range = "linear(0, 12)", default = 2)] pub bend_range: IntParam,
-        #[param(name = "Latency", default = 1)] pub latency: EnumParam<LatencyChoice>,
+        #[param(name = "Latency", default = 2)] pub latency: EnumParam<LatencyChoice>,
         #[param(name = "Bypass", default = false)] pub bypass: BoolParam,
 
         #[meter] pub meter_in: MeterSlot,
@@ -98,7 +99,7 @@ pub mod truce_integration {
         #[meter] pub meter_vib: MeterSlot,
         /// Notas MIDI seguradas (mascara de classes de altura).
         #[meter] pub meter_midi: MeterSlot,
-        /// Modo de latencia ativo + 1 (1 = Track, 2 = Studio; 0 = ainda nao processou).
+        /// Modo de latencia ativo + 1 (1 = Live, 2 = Track, 3 = Studio; 0 = ainda nao processou).
         #[meter] pub meter_mode: MeterSlot,
     }
 

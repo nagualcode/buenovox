@@ -64,6 +64,14 @@ Restart your DAW. In Live: *Plug-Ins → Audio Units → Jardim Sonoro → Bueno
    * **STUDIO** (~270 ms): the brain sees ~190 ms ahead, almost the whole note, before
      correcting it. For mixing.
    * **TRACK** (~95 ms): for recording with monitoring.
+   * **LIVE** (18 ms at any sample rate): for singing on stage. The audio does not wait for
+     the pitch detector:
+     * epoch marks are predicted from the real spacing of the previous cycle and confirmed by
+       correlation, which needs only ~0.7 period of signal ahead;
+     * grains are capped at 5 ms half-windows, so low voices get grains shorter than a period;
+     * note decisions arrive ~30 ms after the sound, so the first ~30 ms of a note after
+       silence pass uncorrected;
+     * Hard divides by each cycle's real period, so its staircase stays sharp.
 
    A mode change takes effect when playback restarts or the plugin reloads.
 
@@ -125,20 +133,25 @@ legato, a legato half step and rests:
 |---|---|---|
 | Natural / Studio | ≤ 2.1 cents | ≤ 1.5 cents |
 | Natural / Track | ≤ 4.0 cents | ≤ 3.6 cents |
+| Natural / Live (18 ms) | ≤ 3.7 cents | ≤ 4.9 cents |
 | Classic (120 ms retune) | ≤ 2.9 cents | ≤ 6.8 cents |
-| Hard | ≤ 2.2 cents | output held still: ≤ 1.6 cents deviation |
+| Hard (Studio and Live) | ≤ 2.0 cents | output held still: ≤ 0.3 cent deviation |
 
 \* 0 = vibrato, drift and fine fluctuation passed through untouched.
 
 Other figures:
 * **Detector:** **0.27 cent** median error, 0% gross errors.
-* **PSOLA with no correction:** **49 dB** SNR against the dry signal (the waveform, not just
-  the timbre).
+* **PSOLA with no correction:** **55 dB** SNR against the dry signal in Studio and **62 dB** in
+  Live (the waveform, not just the timbre). Across voiced/unvoiced boundaries the grain
+  half-windows equal the distance to the neighboring grain on each side, so the windows sum to
+  exactly 1.
+* **Low voice in Live** (A2, 110 Hz, capped grains): corrected within 8 cents, energy within
+  1.2 dB.
 * **Bypass:** identical to the delayed dry signal.
 * **Block size:** output is unchanged between 64 and 1024 samples.
 * **MIDI Target:** 60 → 59.998 and 62 → 61.999.
 * **Pitch bend:** +0.5 st → 60.499.
-* **Robustness:** no data starvation at 44.1, 48 or 96 kHz; survives silence, noise,
+* **Robustness:** no data starvation at 44.1, 48 or 96 kHz in any mode; survives silence, noise,
   impulses, clipping and NaN.
 * **Performance:** ~100× real time at 48 kHz and ~40× at 96 kHz in Studio.
 * **Validators:** passes **auval** (AU v2 and v3) and **pluginval** (VST3).

@@ -3,7 +3,7 @@
 //! bvx_cli <entrada.wav> <saida.wav> [chave=valor ...]
 //!   style=natural|classic|hard  source=scale|miditarget|midiscale  key=C..B  scale=major|minor|...
 //!   amount=0..1  speed=ms  flex=0..1  humanize=0..1  tighten=0..1  vibrato=0..2  create=0..1
-//!   scoop=0..1  throat=-1..1  pure=0|1  a4=Hz  latency=track|studio  block=512
+//!   scoop=0..1  throat=-1..1  pure=0|1  a4=Hz  latency=live|track|studio  block=512
 //!   midi="0-2:60;2-4:62,65"   notas MIDI seguradas por intervalo de tempo (segundos)
 //!   dump=curvas.csv           tempo, altura de entrada, alvo, saida, deslocamento (por quadro)
 //!   compensate=1              remove a latencia do arquivo de saida (padrao 1)
@@ -153,7 +153,13 @@ fn main() {
             "throat" => p.throat = f(),
             "pure" => p.pure = v == "1",
             "a4" => p.brain.a4 = f(),
-            "latency" => mode = if v == "track" { LatencyMode::Track } else { LatencyMode::Studio },
+            "latency" => {
+                mode = match v {
+                    "live" => LatencyMode::Live,
+                    "track" => LatencyMode::Track,
+                    _ => LatencyMode::Studio,
+                }
+            }
             "block" => block = v.parse().unwrap(),
             "midi" => midi = parse_midi(v),
             "dump" => dump = Some(v.to_string()),
@@ -234,5 +240,4 @@ fn main() {
         lat as f64 * 1000.0 / sr as f64,
         e.starved()
     );
-    eprintln!("psola (inicios, travados, passos estimados): {:?}", e.psola_debug());
 }

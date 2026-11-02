@@ -12,15 +12,22 @@
 |---|---|
 | F0 Fundação e régua | Crate, CLI e régua em Rust (cantor sintético de f0 conhecido, 17 testes). Falta a régua Python com datasets públicos e renders dos concorrentes. |
 | F1 Análise | Detector e marcas do Heaven portados. Erro mediano de 0,27 cent no sintético. Falta o árbitro neural. |
-| F2 Síntese | PSOLA por razão: preserva o jitter e trava as marcas, com 49 dB contra o seco sem correção. Faltam a separação de ruído e a pré-distorção cepstral. |
+| F2 Síntese | PSOLA por razão: preserva o jitter e trava as marcas. Janelas complementares nas fronteiras vozeado/não vozeado. Sem correção, 55 dB (Studio) e 62 dB (Live) contra o seco. Faltam a separação de ruído e a pré-distorção cepstral. |
 | F3 Cérebro v1 | Classic e Hard, MIDI Target, MIDI Scale, pitch bend, entonação pura. |
 | F4 Cérebro v2 | Natural: segmentação por movimento, centro curto, altura percebida e deslocamento por nota. Erro de centro ≤ 2,1 cents e expressão ≤ 1,5 cent. Faltam as transições sintetizadas (Saitou), a medição em vozes reais e o MUSHRA. |
 | F5 Plugin | AU, VST3 e CLAP com gráfico de afinação. auval e pluginval passam. O clap-validator falha nos 3 testes de reprodutibilidade de estado, mas os exemplos oficiais do truce 6.3 (Gain, SysEx Echo) falham nos mesmos 3: é do framework. |
 | F6–F8 | Não iniciadas. |
 
 Diferenças em relação à §3.6: por enquanto um crate só (`src/dsp/` sem dependência de
-framework, como no Heaven) em vez de um workspace. A latência mínima medida é ~95 ms (Track) e
-~270 ms (Studio). Um caminho Live abaixo de 20 ms exige um detector causal próprio (F1).
+framework, como no Heaven) em vez de um workspace.
+
+Latências: **Live 18 ms**, Track ~95 ms, Studio ~270 ms. No Live:
+* as marcas de época são previstas pelo espaçamento real do ciclo anterior e confirmadas por
+  correlação;
+* os grãos ficam limitados a 5 ms;
+* as decisões de nota chegam ~30 ms depois do som.
+
+Natural/Live: erro de centro ≤ 3,7 cents e expressão ≤ 4,9 cents.
 
 ---
 
