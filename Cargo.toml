@@ -1,0 +1,49 @@
+[package]
+name = "buenovox"
+version = "0.1.0"
+edition = "2021"
+description = "BuenoVOX: correcao de afinacao vocal natural em Rust (truce)"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "buenovox"
+path = "src/lib.rs"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[[bin]]
+name = "bvx_cli"
+path = "src/bin/bvx_cli.rs"
+
+[features]
+default = ["truce-plugin"]
+truce-plugin = ["dep:truce", "dep:truce-egui", "dep:egui"]
+clap = ["truce-plugin", "dep:truce-clap", "dep:clap-sys"]
+vst3 = ["truce-plugin", "dep:truce-vst3"]
+au = ["truce-plugin", "dep:truce-au"]
+
+[dependencies]
+realfft = "3.4"
+hound = "3.5"
+truce = { version = "6.3", optional = true }
+truce-egui = { version = "6.3", optional = true }
+egui = { version = "0.34", optional = true }
+truce-clap = { version = "6.3", optional = true }
+clap-sys = { version = "0.5", optional = true }
+truce-vst3 = { version = "6.3", optional = true }
+truce-au = { version = "6.3", optional = true }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 1
+
+# perfil da regua: otimizado como o release, mas com unwind (o harness de testes exige; com
+# panic=abort o cargo compila a lib duas vezes no mesmo diretorio e o binario linka errado)
+[profile.regua]
+inherits = "release"
+panic = "unwind"
+lto = false

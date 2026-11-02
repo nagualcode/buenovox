@@ -1,0 +1,14 @@
+[vendor]
+name = "Jardim Sonoro"
+id = "com.jardimsonoro"
+au_manufacturer = "JdSn"
+
+[[plugin]]
+name = "BuenoVOX"
+bundle_id = "buenovox"
+crate = "buenovox"
+category = "effect"
+vst3_subcategory = "Pitch Shift"
+fourcc = "BVox"
+au_tag = "Music Effects"
+midi_input = true

@@ -1,0 +1,371 @@
+//! A regua: o BuenoVOX medido contra um cantor sintetico de f0 conhecido.
+//!
+//! Quem escreve o DSP nao pode ouvir, entao tudo que deve soar bem precisa antes medir bem
+//! (PLANO.md, secao 4). Cada teste imprime as medidas (`cargo test --release -- --nocapture`).
+
+use buenovox::dsp::pitch::PitchTracker;
+use buenovox::dsp::testsig::{render, Rendered, SingerSpec, SungNote};
+use buenovox::dsp::{Engine, EngineParams, LatencyMode, Source, Style};
+
+const SR: f32 = 48_000.0;
+
+fn hz_to_midi(f: f32) -> f32 { 69.0 + 12.0 * (f / 440.0).log2() }
+
+/// Passa `x` (mono) pelo motor e devolve a saida alinhada (latencia removida).
+fn run(x: &[f32], sr: f32, mode: LatencyMode, p: &EngineParams, block: usize, midi: &dyn Fn(&mut Engine, usize, usize)) -> (Vec<f32>, u64) {
+    let mut e = Engine::new(sr, mode);
+    let lat = e.latency();
+    let total = x.len() + lat;
+    let mut out = vec![0.0f32; total];
+    let mut scratch = vec![0.0f32; total];
+    let mut pos = 0;
+    while pos < total {
+        let m = block.min(total - pos);
+        e.set_params(p);
+        midi(&mut e, pos, m);
+        let mut inp = vec![0.0f32; m];
+        for (k, v) in inp.iter_mut().enumerate() {
+            *v = x.get(pos + k).copied().unwrap_or(0.0);
+        }
+        let (a, b) = (&mut out[pos..pos + m], &mut scratch[pos..pos + m]);
+        e.process(&inp, &inp, a, b);
+        pos += m;
+    }
+    (out[lat..].to_vec(), e.starved())
+}
+
+fn no_midi(_: &mut Engine, _: usize, _: usize) {}
+
+/// Altura medida (MIDI) a cada 4 ms; NaN sem vozeamento.
+fn measure(x: &[f32], sr: f32) -> Vec<f32> {
+    let mut pt = PitchTracker::new(sr);
+    // em blocos: o anel interno do rastreador nao guarda o sinal inteiro
+    for chunk in x.chunks(512) {
+        pt.push(chunk);
+    }
+    let hop = (sr * 0.004) as usize;
+    (0..x.len() / hop)
+        .map(|k| {
+            let fr = pt.at((k * hop) as f64);
+            if fr.voiced() { hz_to_midi(fr.f0) } else { f32::NAN }
+        })
+        .collect()
+}
+
+/// f0 verdadeiro (MIDI) na mesma grade de 4 ms.
+fn truth(r: &Rendered, sr: f32) -> Vec<f32> {
+    let hop = (sr * 0.004) as usize;
+    (0..r.f0.len() / hop).map(|k| if r.f0[k * hop] > 0.0 { hz_to_midi(r.f0[k * hop]) } else { f32::NAN }).collect()
+}
+
+fn mean_std(v: &[f32]) -> (f32, f32) {
+    let n = v.len().max(1) as f32;
+    let m = v.iter().sum::<f32>() / n;
+    let s = (v.iter().map(|x| (x - m) * (x - m)).sum::<f32>() / n).sqrt();
+    (m, s)
+}
+
+/// Frase de teste: notas desafinadas (ate `detune` cents, para os dois lados), com vibrato,
+/// legato, um meio tom ligado e silencios. Vizinhos de meio tom nunca erram um em direcao ao
+/// outro a ponto de virar a mesma altura (isso seria ambiguo ate para o ouvido).
+fn phrase(detune: f32, vib: f32) -> Rendered {
+    let signs = [1.0, -0.85, 0.7, -1.0, 0.85, 0.55, -0.7];
+    let notes = [60.0, 62.0, 64.0, 65.0, 67.0, 65.0, 64.0]
+        .iter()
+        .enumerate()
+        .map(|(i, &m)| {
+            let n = SungNote::new(m, signs[i] * detune, 0.85).vibrato(5.3 + 0.1 * i as f32, vib);
+            if i == 2 || i == 4 { n.gap(0.2) } else { n }
+        })
+        .collect();
+    render(&SingerSpec::new(SR, notes))
+}
+
+struct NoteReport {
+    intended: f32,
+    /// Erro do centro da nota em relacao ao alvo (cents).
+    center_err: f32,
+    /// Variacao do deslocamento aplicado dentro da nota (cents): 0 = expressao intacta.
+    expr_err: f32,
+    /// Variacao da saida em torno do proprio centro (cents).
+    out_std: f32,
+}
+
+/// Mede cada nota no corpo (sem o ataque e o fim): centro, preservacao da expressao.
+fn report(r: &Rendered, out: &[f32], sr: f32) -> Vec<NoteReport> {
+    let hop = (sr * 0.004) as usize;
+    let tin = truth(r, sr);
+    let tout = measure(out, sr);
+    r.spans
+        .iter()
+        .map(|sp| {
+            let k0 = (sp.start + (0.15 * sr) as usize) / hop;
+            let k1 = (sp.end - (0.1 * sr) as usize) / hop;
+            let mut d = Vec::new();
+            let mut o = Vec::new();
+            for k in k0..k1.min(tout.len()) {
+                if tout[k].is_finite() && tin[k].is_finite() {
+                    d.push(tout[k] - tin[k]);
+                    o.push(tout[k]);
+                }
+            }
+            let (dm, ds) = mean_std(&d);
+            let (_, os) = mean_std(&o);
+            // a saida ideal e a entrada deslocada de (pretendida - cantada)
+            NoteReport { intended: sp.intended, center_err: 100.0 * (dm - (sp.intended - sp.sung)), expr_err: 100.0 * ds, out_std: 100.0 * os }
+        })
+        .collect()
+}
+
+fn print(name: &str, rep: &[NoteReport]) {
+    println!("--- {name}");
+    for n in rep {
+        println!("  nota {:>5.1}: centro {:>+6.2} c   expressao {:>5.2} c   desvio da saida {:>5.2} c", n.intended, n.center_err, n.expr_err, n.out_std);
+    }
+}
+
+fn c_major() -> EngineParams {
+    EngineParams { key: 0, scale: 1, ..Default::default() }
+}
+
+// ---------------------------------------------------------------------------------- detector
+
+#[test]
+fn detector_accuracy_on_synthetic_voice() {
+    let r = phrase(0.0, 40.0);
+    let est = measure(&r.audio, SR);
+    let tru = truth(&r, SR);
+    let mut errs: Vec<f32> = Vec::new();
+    let mut gross = 0;
+    let mut voiced = 0;
+    for (k, (&e, &t)) in est.iter().zip(&tru).enumerate() {
+        // so o corpo das notas (o vozeamento comeca/acaba com o envelope)
+        let inside = r.spans.iter().any(|s| k * 192 > s.start + 2400 && k * 192 + 2400 < s.end);
+        if !inside || !t.is_finite() {
+            continue;
+        }
+        voiced += 1;
+        if !e.is_finite() {
+            gross += 1;
+            continue;
+        }
+        let c = 100.0 * (e - t).abs();
+        if c > 50.0 {
+            gross += 1;
+        } else {
+            errs.push(c);
+        }
+    }
+    errs.sort_by(f32::total_cmp);
+    let med = errs[errs.len() / 2];
+    let rate = gross as f32 / voiced as f32;
+    println!("detector: erro mediano {med:.2} cents, erro grosseiro {:.2}% de {voiced} quadros", 100.0 * rate);
+    assert!(med < 3.0, "erro mediano {med}");
+    assert!(rate < 0.01, "erro grosseiro {rate}");
+}
+
+// ---------------------------------------------------------------------------------- correcao
+
+#[test]
+fn natural_studio_corrects_center_and_keeps_expression() {
+    let r = phrase(35.0, 40.0);
+    let (out, starved) = run(&r.audio, SR, LatencyMode::Studio, &c_major(), 512, &no_midi);
+    assert_eq!(starved, 0);
+    let rep = report(&r, &out, SR);
+    print("Natural / Studio, cantor +-35 cents, vibrato 40 cents", &rep);
+    for n in &rep {
+        assert!(n.center_err.abs() < 5.0, "nota {} centro {}", n.intended, n.center_err);
+        assert!(n.expr_err < 5.0, "nota {} expressao {}", n.intended, n.expr_err);
+        // o vibrato continua la (RMS de 40 cents de pico ~ 28 cents, menos a entrada gradual)
+        assert!(n.out_std > 12.0, "nota {} vibrato achatado: {}", n.intended, n.out_std);
+    }
+}
+
+#[test]
+fn natural_track_mode() {
+    let r = phrase(35.0, 40.0);
+    let (out, starved) = run(&r.audio, SR, LatencyMode::Track, &c_major(), 256, &no_midi);
+    assert_eq!(starved, 0);
+    let rep = report(&r, &out, SR);
+    print("Natural / Track", &rep);
+    for n in &rep {
+        assert!(n.center_err.abs() < 8.0, "nota {} centro {}", n.intended, n.center_err);
+        assert!(n.expr_err < 8.0, "nota {} expressao {}", n.intended, n.expr_err);
+    }
+}
+
+#[test]
+fn hard_flattens_everything() {
+    let r = phrase(35.0, 40.0);
+    let mut p = c_major();
+    p.brain.style = Style::Hard;
+    let (out, _) = run(&r.audio, SR, LatencyMode::Studio, &p, 512, &no_midi);
+    let rep = report(&r, &out, SR);
+    print("Hard", &rep);
+    for n in &rep {
+        // a saida fica parada na nota: o centro do desvio vira o proprio alvo
+        assert!(n.out_std < 6.0, "nota {} ainda oscila {}", n.intended, n.out_std);
+    }
+}
+
+#[test]
+fn classic_slow_retune_keeps_vibrato() {
+    let r = phrase(35.0, 40.0);
+    let mut p = c_major();
+    p.brain.style = Style::Classic;
+    p.brain.speed_ms = 120.0;
+    p.brain.humanize = 0.0;
+    let (out, _) = run(&r.audio, SR, LatencyMode::Studio, &p, 512, &no_midi);
+    let rep = report(&r, &out, SR);
+    print("Classic, retune 120 ms", &rep);
+    for n in &rep {
+        // retune lento e correcao parcial por definicao: o centro chega perto, o vibrato fica
+        assert!(n.center_err.abs() < 12.0, "nota {} centro {}", n.intended, n.center_err);
+        assert!(n.out_std > 8.0, "nota {} vibrato achatado {}", n.intended, n.out_std);
+    }
+}
+
+#[test]
+fn vibrato_knob_scales_vibrato() {
+    let r = phrase(0.0, 40.0);
+    let mut p = c_major();
+    p.brain.vibrato = 0.0;
+    let (flat, _) = run(&r.audio, SR, LatencyMode::Studio, &p, 512, &no_midi);
+    p.brain.vibrato = 1.0;
+    let (keep, _) = run(&r.audio, SR, LatencyMode::Studio, &p, 512, &no_midi);
+    let a = report(&r, &flat, SR);
+    let b = report(&r, &keep, SR);
+    let ma = a.iter().map(|n| n.out_std).sum::<f32>() / a.len() as f32;
+    let mb = b.iter().map(|n| n.out_std).sum::<f32>() / b.len() as f32;
+    println!("vibrato 0%: {ma:.1} cents RMS, 100%: {mb:.1} cents RMS");
+    assert!(ma < 0.4 * mb, "vibrato 0% deveria quase sumir: {ma} vs {mb}");
+}
+
+// ---------------------------------------------------------------------------------- MIDI
+
+#[test]
+fn midi_target_overrides_scale() {
+    // canta 60.3 o tempo todo; o MIDI pede 62 na segunda metade
+    let notes = vec![SungNote::new(60.0, 30.0, 2.0)];
+    let r = render(&SingerSpec::new(SR, notes));
+    let mut p = c_major();
+    p.source = Source::MidiTarget;
+    let half = r.spans[0].start + (1.0 * SR) as usize;
+    let midi = move |e: &mut Engine, pos: usize, m: usize| {
+        if pos == 0 {
+            e.note_on(0, 60);
+        }
+        if (pos..pos + m).contains(&half) {
+            e.note_off(half - pos, 60);
+            e.note_on(half - pos, 62);
+        }
+    };
+    let (out, _) = run(&r.audio, SR, LatencyMode::Studio, &p, 512, &midi);
+    let tout = measure(&out, SR);
+    let hop = (SR * 0.004) as usize;
+    let seg = |a: usize, b: usize| mean_std(&tout[a / hop..b / hop].iter().copied().filter(|x| x.is_finite()).collect::<Vec<_>>()).0;
+    let first = seg(r.spans[0].start + 12000, half - 9600);
+    let second = seg(half + 14400, r.spans[0].end - 4800);
+    println!("MIDI 60 -> {first:.3}, MIDI 62 -> {second:.3}");
+    assert!((first - 60.0).abs() < 0.06);
+    assert!((second - 62.0).abs() < 0.06);
+}
+
+#[test]
+fn pitch_bend_moves_target() {
+    let notes = vec![SungNote::new(60.0, 0.0, 1.5)];
+    let r = render(&SingerSpec::new(SR, notes));
+    let mut p = c_major();
+    p.source = Source::MidiTarget;
+    p.bend_range = 2.0;
+    let midi = |e: &mut Engine, pos: usize, _m: usize| {
+        if pos == 0 {
+            e.note_on(0, 60);
+            e.pitch_bend(0, 0.25);
+        }
+    };
+    let (out, _) = run(&r.audio, SR, LatencyMode::Studio, &p, 512, &midi);
+    let tout = measure(&out, SR);
+    let hop = (SR * 0.004) as usize;
+    let s = &r.spans[0];
+    let (m, _) = mean_std(&tout[(s.start + 14400) / hop..(s.end - 4800) / hop].iter().copied().filter(|x| x.is_finite()).collect::<Vec<_>>());
+    println!("bend +0.5 st -> {m:.3}");
+    assert!((m - 60.5).abs() < 0.06);
+}
+
+// ---------------------------------------------------------------------------------- engenharia
+
+#[test]
+fn bypass_is_exact_delayed_dry() {
+    let r = phrase(35.0, 40.0);
+    let mut p = c_major();
+    p.bypass = true;
+    let (out, _) = run(&r.audio, SR, LatencyMode::Studio, &p, 512, &no_midi);
+    // o cruzamento de 10 ms no inicio ja terminou antes do sinal (lead-in de 250 ms)
+    let err = out.iter().zip(&r.audio).skip(4800).fold(0.0f32, |a, (o, i)| a.max((o - i).abs()));
+    assert!(err < 1e-6, "bypass diferente do seco: {err}");
+}
+
+#[test]
+fn psola_identity_when_no_correction() {
+    let r = phrase(0.0, 40.0);
+    let mut p = c_major();
+    p.brain.amount = 0.0;
+    let (out, _) = run(&r.audio, SR, LatencyMode::Studio, &p, 512, &no_midi);
+    let (mut se, mut ss) = (0.0f64, 0.0f64);
+    for (o, i) in out.iter().zip(&r.audio).skip(12000) {
+        se += ((o - i) as f64).powi(2);
+        ss += (*i as f64).powi(2);
+    }
+    let snr = 10.0 * (ss / se.max(1e-20)).log10();
+    println!("PSOLA sem correcao: SNR em relacao ao seco {snr:.1} dB");
+    assert!(snr > 40.0, "PSOLA sem correcao deveria ser transparente: {snr} dB");
+}
+
+#[test]
+fn block_size_does_not_change_output() {
+    let r = phrase(35.0, 40.0);
+    let (a, _) = run(&r.audio, SR, LatencyMode::Studio, &c_major(), 64, &no_midi);
+    let (b, _) = run(&r.audio, SR, LatencyMode::Studio, &c_major(), 1024, &no_midi);
+    let err = a.iter().zip(&b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()));
+    assert!(err < 1e-5, "saida depende do tamanho do bloco: {err}");
+}
+
+#[test]
+fn never_starves_at_common_rates() {
+    for &sr in &[44_100.0f32, 48_000.0, 96_000.0] {
+        let notes = vec![SungNote::new(45.0, 20.0, 0.8).vibrato(5.5, 50.0), SungNote::new(76.0, -20.0, 0.8)];
+        let r = render(&SingerSpec::new(sr, notes));
+        for mode in [LatencyMode::Track, LatencyMode::Studio] {
+            let (_, starved) = run(&r.audio, sr, mode, &c_major(), 333, &no_midi);
+            assert_eq!(starved, 0, "fome em {sr} Hz, {mode:?}");
+        }
+    }
+}
+
+#[test]
+fn survives_hostile_input() {
+    let n = 48_000;
+    let mut rng = 12345u64;
+    let mut noise = || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        (rng >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0
+    };
+    let inputs: Vec<Vec<f32>> = vec![
+        vec![0.0; n],
+        (0..n).map(|_| noise()).collect(),
+        (0..n).map(|i| if i % 4800 == 0 { 1.0 } else { 0.0 }).collect(),
+        (0..n).map(|i| if (i / 100) % 2 == 0 { 4.0 } else { -4.0 }).collect(),
+        (0..n).map(|i| if i % 7 == 0 { f32::NAN } else { (i as f32 * 0.03).sin() }).collect(),
+    ];
+    for x in &inputs {
+        for style in [Style::Natural, Style::Classic, Style::Hard] {
+            let mut p = c_major();
+            p.brain.style = style;
+            let (out, _) = run(x, SR, LatencyMode::Studio, &p, 512, &no_midi);
+            assert!(out.iter().all(|v| v.is_finite() && v.abs() < 16.0));
+        }
+    }
+}
