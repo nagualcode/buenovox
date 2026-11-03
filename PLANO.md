@@ -6,7 +6,7 @@
 >
 > Documento vivo. Versão 0.1, 2026-11-01.
 
-## Status (2026-11-01)
+## Status (2026-11-03)
 
 | Fase | Situação |
 |---|---|
@@ -14,7 +14,8 @@
 | F1 Análise | Detector e marcas do Heaven portados. Erro mediano de 0,27 cent no sintético. Árbitro neural (CNN de 4,8 mil parâmetros sobre periodicidade do YIN + espectro empilhado por harmônicos, treinada em vozes sintéticas fonte-filtro + 2,6 h do VocalSet rotulado pelo CREPE): no vocadito (anotação humana) erros de oitava 1,03% → 0,39%, grosseiros 3,23% → 2,63%, voz falsa 21,1% → 18,9%, sem perder voz. Sozinha a rede acerta 97,9% das alturas (o YIN 94,3%), mas sem vale do CMND perto dela a precisão fina se perde: próximo passo, usar a altura da rede onde o YIN não tem vale. |
 | F2 Síntese | PSOLA por razão: preserva o jitter e trava as marcas. Meias janelas assimétricas (distância real até as marcas vizinhas): sem correção, 87 dB (Studio) e 98 dB (Live) contra o seco. Separação harmônico + ar (média de ciclos realinhados, corte FIR de fase linear em 1 kHz): fantasma −24 dB, ar que fica na parte corrigida −13 dB (Studio) numa voz com HNR de 6 dB. Falta a pré-distorção cepstral e refazer o pulsar do ar no ritmo dos ciclos novos. |
 | F3 Cérebro v1 | Classic e Hard, MIDI Target, MIDI Scale, pitch bend, entonação pura. |
-| F4 Cérebro v2 | Natural: segmentação por movimento, centro curto, altura percebida e deslocamento por nota. Erro de centro ≤ 2,1 cents e expressão ≤ 1,5 cent. Faltam as transições sintetizadas (Saitou), a medição em vozes reais e o MUSHRA. |
+| F4 Cérebro v2 | Natural: segmentação por movimento, centro curto, altura percebida e deslocamento por nota. Erro de centro ≤ 2,1 cents e expressão ≤ 1,5 cent no sintético. Em canto real (vocadito, 1.339 notas anotadas como alvo): erro mediano 5,8 cents no Studio e 11,6 no Live (o cantor erra 25). Transições medidas em 2.454 passos do VocalSet (overshoot 15–19% em passos pequenos, ζ 0,47–0,63) e usadas no retune do Classic. Centro percebido e prior melódico medidos e deixados de lado (as anotações guardam a média e a nota cantada, não a percepção nem a intenção). Falta o MUSHRA. |
+| F5+ Latência | Live em 11 ms (era 18): a síntese devolve o erro do período estimado, grãos de 3,5 ms com janela de topo plano no lado do passado, FIR da separação de 1,5 ms. Modo Auto (padrão): Live ao monitorar (parado ou gravando), Studio na reprodução e no bounce, com os dois motores em paralelo. Presets de fábrica, teclado de notas na interface, transcrição para MIDI no CLI. |
 | F5 Plugin | AU, VST3 e CLAP com gráfico de afinação. auval e pluginval passam. O clap-validator falha nos 3 testes de reprodutibilidade de estado, mas os exemplos oficiais do truce 6.3 (Gain, SysEx Echo) falham nos mesmos 3: é do framework. |
 | F6–F8 | Não iniciadas. |
 

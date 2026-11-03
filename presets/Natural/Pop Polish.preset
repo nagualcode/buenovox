@@ -1,0 +1,14 @@
+uuid = "a6adcdd2-8f6d-48d6-aa9b-5ba22c76ffea"
+name = "Pop Polish"
+category = "Natural"
+comment = "Modern pop: tighter drift, shorter scoops, a touch less vibrato."
+
+[params]
+style = 0
+amount = 1.0
+speed = 15.0
+tighten = 0.45
+vibrato = 0.9
+vib_create = 0.0
+scoop = 0.5
+breath = 1.0

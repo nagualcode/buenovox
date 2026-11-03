@@ -1,0 +1,9 @@
+uuid = "ddd87db5-cad0-4171-a07c-7d2a40e17ffc"
+name = "Hard Tune"
+category = "Effect"
+comment = "The effect: instant retune, notes held still."
+
+[params]
+style = 2
+amount = 1.0
+vibrato = 0.0

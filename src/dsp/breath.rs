@@ -40,6 +40,8 @@ const FIR_BLOCK: usize = 256;
 pub const SPLIT_HZ: f64 = 1000.0;
 /// Meia duracao do FIR de corte (s): atraso que a separacao precisa de sinal a frente.
 pub const SPLIT_HALF: f64 = 0.003;
+/// No modo ao vivo o FIR e mais curto (cabe na latencia; o corte fica mais suave).
+pub const SPLIT_HALF_LIVE: f64 = 0.0015;
 
 /// Receita da media em torno de uma marca: deslocamentos ate os ciclos vizinhos e pesos
 /// normalizados (o proprio ciclo tem deslocamento 0).
@@ -131,9 +133,12 @@ pub struct BreathSplit {
 
 impl BreathSplit {
     /// `past`/`fut`: alcance da media em segundos (`fut = 0` no modo ao vivo).
-    pub fn new(sr: f32, past: f64, fut: f64) -> Self {
+    pub fn new(sr: f32, past: f64, fut: f64) -> Self { Self::with_fir(sr, past, fut, SPLIT_HALF) }
+
+    /// Como `new`, com a meia duracao do FIR de corte escolhida (s).
+    pub fn with_fir(sr: f32, past: f64, fut: f64, fir_half: f64) -> Self {
         let sr64 = sr as f64;
-        let half = (SPLIT_HALF * sr64).round() as i64;
+        let half = (fir_half * sr64).round() as i64;
         // seno cardinal com janela de Blackman, ganho 1 em DC
         let wc = SPLIT_HZ / sr64;
         let mut lp: Vec<f32> = (-half..=half)

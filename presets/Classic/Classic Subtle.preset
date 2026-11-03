@@ -1,0 +1,11 @@
+uuid = "8a90654c-5a96-4e42-ad29-c9e34f76b24f"
+name = "Classic Subtle"
+category = "Classic"
+comment = "Traditional slow retune, only near the note, longer notes looser."
+
+[params]
+style = 1
+amount = 1.0
+speed = 80.0
+flex = 0.5
+humanize = 0.5

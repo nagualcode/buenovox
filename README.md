@@ -46,8 +46,11 @@ Restart your DAW. In Live: *Plug-Ins → Audio Units → Jardim Sonoro → Bueno
    * **NATURAL** (default): moves each whole note to its target as a block. Vibrato, drift
      and attack stay the singer's own. Between legato notes the offset migrates in
      proportion to the singer's own glide.
-   * **CLASSIC**: traditional correction, with *Speed* (2nd-order retune), *Flex* (only
-     corrects near the note) and *Humanize* (longer notes are left looser).
+   * **CLASSIC**: traditional correction, with *Speed* (retune rise time), *Flex* (only
+     corrects near the note) and *Humanize* (longer notes are left looser). The retune is a
+     2nd-order underdamped response whose damping was measured on 2,454 real note transitions
+     in VocalSet: the voice goes slightly past the target and settles, like a singer, instead of
+     arriving on an exponential curve.
    * **HARD**: instant retune, the effect. The note is chosen from the note's center, not
      from the instantaneous f0, so an out-of-tune singer with vibrato does not warble between
      two notes.
@@ -63,7 +66,8 @@ Restart your DAW. In Live: *Plug-Ins → Audio Units → Jardim Sonoro → Bueno
    The singer may anticipate or lag a MIDI note change by up to 60 ms.
 4. **Correction:**
    * **Amount**: how much of the error to correct. 0% is transparent.
-   * **Speed**: in Natural, smoothing of the note offset; in Classic, the retune time.
+   * **Speed**: in Natural, smoothing of the note offset; in Classic, the retune rise time
+     (10% to 90%).
    * **Tighten** (Natural): how much to flatten slow drift inside a note.
    * **Scoop** (Natural): shortens scoops and falls at onsets after silence.
 5. **Expression:**
@@ -81,20 +85,32 @@ Restart your DAW. In Live: *Plug-Ins → Audio Units → Jardim Sonoro → Bueno
 8. **Tuning:**
    * **Pure Tuning**: just intonation relative to the lowest held MIDI note (or the tonic).
    * **A4**: reference from 415 to 466 Hz.
-9. **Latency**, reported to the host (Live compensates on playback):
+9. **Latency**, reported to the host:
+   * **AUTO** (default): **Live** while you monitor (transport stopped or recording),
+     **Studio** when the track plays back or is bounced/exported. The host tells the plugin
+     whether it is playing, recording or rendering offline; both engines run side by side, the
+     switch crossfades in 30 ms and the latency reported to the host follows the active engine.
+     The host cannot tell the plugin whether its input is a live microphone, so monitoring while
+     the transport plays without recording gets Studio latency; pick **LIVE** for that.
+   * **LIVE** (**11 ms** at any sample rate): for singing on stage or monitoring. The audio does
+     not wait for the pitch detector:
+     * epoch marks are predicted from the real spacing of the previous cycle and confirmed by
+       correlation, which needs only ~0.7 period of signal ahead; when a mark arrives later than
+       its estimate, the synthesis grid takes the difference back on the next step, so it stays
+       locked to the voice;
+     * grains are capped at 3.5 ms on the future side; on the past side (which costs no
+       latency) the window reaches back to the previous grain with a flat top, so the windows
+       still sum to 1 and low voices keep their level;
+     * note changes are detected from the past only, with shorter windows and transitions;
+     * Hard divides by each cycle's real period, so its staircase stays sharp.
+   * **TRACK** (~105 ms): for recording with monitoring when a little more context helps.
    * **STUDIO** (~270 ms): the brain sees ~190 ms ahead, almost the whole note, before
      correcting it. For mixing.
-   * **TRACK** (~95 ms): for recording with monitoring.
-   * **LIVE** (18 ms at any sample rate): for singing on stage. The audio does not wait for
-     the pitch detector:
-     * epoch marks are predicted from the real spacing of the previous cycle and confirmed by
-       correlation, which needs only ~0.7 period of signal ahead;
-     * grains are capped at 5 ms half-windows, so low voices get grains shorter than a period;
-     * note decisions arrive ~30 ms after the sound, so the first ~30 ms of a note after
-       silence pass uncorrected;
-     * Hard divides by each cycle's real period, so its staircase stays sharp.
+10. **Presets** (factory, in the host's preset menu): Natural, Pop Polish, Bossa Intimate,
+    Gospel and R&B, Lyric, Live Stage, Classic Subtle, Melodic Rap, Hard Tune.
 
-   A mode change takes effect when playback restarts or the plugin reloads.
+The **NOTES** keyboard shows the scale's notes, the MIDI notes held (blue), the note being sung
+(outline) and the target (orange).
 
 ---
 
@@ -184,8 +200,8 @@ legato, a legato half step and rests:
 |---|---|---|
 | Natural / Studio | ≤ 2.1 cents | ≤ 1.5 cents |
 | Natural / Track | ≤ 4.0 cents | ≤ 3.6 cents |
-| Natural / Live (18 ms) | ≤ 3.7 cents | ≤ 4.9 cents |
-| Classic (120 ms retune) | ≤ 2.9 cents | ≤ 6.8 cents |
+| Natural / Live (11 ms) | ≤ 3.7 cents | ≤ 4.9 cents |
+| Classic (120 ms retune) | ≤ 2.1 cents | ≤ 6.4 cents |
 | Hard (Studio and Live) | ≤ 2.0 cents | output held still: ≤ 0.3 cent deviation |
 
 \* 0 = vibrato, drift and fine fluctuation passed through untouched.
@@ -198,12 +214,28 @@ Other figures:
   | | Pitch within 50 cents | Gross errors | Octave errors | Voice found | False voice |
   |---|---|---|---|---|---|
   | YIN alone | 94.3% | 3.23% | 1.03% | 97.5% | 21.1% |
-  | YIN + network | **95.1%** | **2.63%** | **0.39%** | **97.7%** | **18.9%** |
+  | YIN + network | **94.9%** | **2.57%** | **0.37%** | **97.4%** | **15.8%** |
 
   On held-out synthetic hard voices (fry, belt, breathy, thin mic, reverb, noise): gross errors
-  13.4% → 5.2%, octave errors 10.1% → 2.4%, voice found 91.2% → 91.8%. On two held-out VocalSet
-  singers, against CREPE labels: octave errors 1.10% → 0.50% overall, vocal fry 3.8% → 1.5%,
-  belt 0.6% → 0%.
+  13.4% → 4.8%, octave errors 10.1% → 2.4%, false voicing 6.0% → 4.1%, voice found 91.2% →
+  91.0%. On two held-out VocalSet singers, against CREPE labels: octave errors 1.10% → 0.48%
+  overall, vocal fry 3.8% → 1.4%, belt 0.6% → 0%.
+* **Correction on real singing:** vocadito's 1,339 hand-annotated notes used as MIDI targets
+  (the singers are off by 25 cents median, 50 cents at the 90th percentile). Pitch of each note
+  body after correction, and how much the singer's own movement inside the note was changed:
+
+  | | Remaining error (median / 90%) | Expression changed (median) |
+  |---|---|---|
+  | Natural / Studio | **5.8 / 22 cents** | 7.3 cents |
+  | Natural / Live | 11.6 / 36 cents | 18.8 cents |
+  | Hard / Live | 0.3 / 2.3 cents | (flattened by design) |
+
+  In Live, Natural only sees the past of each note, so it settles on the note later; Hard hits
+  the note from its first frames.
+* **Large shifts** (a straight C4 retuned by MIDI from C3 to C5): level within 0.9 dB of the
+  input in Studio and 1.35 dB in Live, no clicks; spectral envelope (formants) within 0.6–2.2 dB
+  RMS, not growing with the shift.
+* **Classic retune:** a note sung 40 cents flat goes 4.6 cents past the target and settles on it.
 * **PSOLA with no correction:** **87 dB** SNR against the dry signal in Studio and **98 dB** in
   Live, with breath separation on (the waveform, not just the timbre).
 * **Breath separation**, on a very breathy synthetic voice (harmonic-to-noise ratio 6 dB, 40-cent
@@ -218,6 +250,9 @@ Other figures:
   Breathy voice shifted up 4 semitones by MIDI: the high-band harmonic-to-noise ratio measured on
   the output is 7.8 dB without separation (the air became periodic) and 6.0 dB with it, against
   5.6 dB on the input. **Breath** at 0% removes 12 dB of air; at 200% adds 5.6 dB.
+* **Live latency sweep** (identity without correction / Natural center error / low voice level):
+  18 ms 97 dB / 3.7 c / −0.04 dB; **11 ms 96 dB / 3.9 c / −0.3 dB**; 8 ms breaks low voices
+  (grains too short for their period).
 * **Live with large host buffers:** after a rest, the first marks of a note arrive after the grain
   plan has passed the onset; a bridging grain re-locks the plan to the marks (before this fix,
   with 512- or 1024-sample buffers the rest of the note came out up to 5 ms shifted).
@@ -242,8 +277,13 @@ cargo build --release --no-default-features --bin bvx_cli
 target/release/bvx_cli gen phrase.wav detune=35 vibrato=40  # synthetic singer
 target/release/bvx_cli vocal.wav out.wav key=C scale=major style=natural dump=curves.csv
 target/release/bvx_cli vocal.wav out.wav source=miditarget midi="0-2:60;2-4:62"
+target/release/bvx_cli vocal.wav out.wav key=C scale=major mid=notes.mid   # transcribe to MIDI
 cargo truce screenshot --out docs/gui.png
 ```
+
+Measurements on real singing (`train/`): `eval_correction.py` (vocadito notes as targets),
+`eval_center.py` (note center vs annotation), `eval_notes.py` (wrong-note rate),
+`transitions.py` (note transitions in VocalSet).
 
 Neural detector (Python only for training; the plugin has no Python or ONNX dependency):
 
@@ -257,5 +297,23 @@ python check.py runs/net.bin.pt ../models/pitchnet_check.bin   # PyTorch referen
 
 `bvx_cli` runs the plugin's own engine offline. With `dump=` it writes, every 4 ms frame, the
 input pitch, target, output, shift, vibrato, note center, local center and anchor.
+
+## Measured and set aside
+
+* **Cepstral pre-distortion for large shifts:** the spectral envelope already stays within
+  0.6–2.2 dB from −12 to +12 semitones (each PSOLA grain carries the vocal tract's response).
+* **Learned perceived-pitch weights:** vocadito's note pitches match the plain mean of f0 (6.0
+  cents median) better than any attack-weighted center, so they record the annotation tool's
+  average, not perception; learning from them would only copy the mean. Needs a listening test.
+* **Melodic/key prior for the intended note:** forcing the key estimated from the notes made the
+  wrong-note rate worse on vocadito (19.5% → 33.9%): singers use chromatic notes, and the
+  annotations hold the sung note, not the intended one. Without scores there is nothing to
+  validate a prior against.
+* **Re-pulsing the separated air at the new cycle rate:** for usual corrections (under 50
+  cents) the air and the voice drift apart by a few hertz at low modulation depth; left for
+  when there is a listening test.
+* **Faster note onsets in Live:** the first ~35 ms after a rest still pass uncorrected. The
+  detector's window must span 32 ms to see periods down to 62 Hz; shortening it to the
+  singer's range changes the frame structure the whole brain relies on.
 
 License: MIT or Apache-2.0.

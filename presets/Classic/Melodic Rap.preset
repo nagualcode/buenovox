@@ -1,0 +1,11 @@
+uuid = "865c5a0f-f82e-4b85-8c9f-e9d9ddbf417c"
+name = "Melodic Rap"
+category = "Classic"
+comment = "Fast classic retune for melodic rap and trap hooks."
+
+[params]
+style = 1
+amount = 1.0
+speed = 15.0
+flex = 0.3
+humanize = 0.2

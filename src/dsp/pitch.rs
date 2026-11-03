@@ -29,12 +29,15 @@ pub struct Fusion {
     pub min_aper_off: f32,
     /// YIN e rede concordam se a distancia for menor que isto (semitons).
     pub agree_st: f32,
+    /// Sem vale do CMND perto da rede, a altura da propria rede vale acima desta confianca
+    /// (acima de 1 = nunca).
+    pub net_pitch: f32,
 }
 
 impl Default for Fusion {
     /// Ajustado no vocadito (anotacao humana): a rede corrige a oitava e desmente voz falsa, mas
     /// nao afirma voz sozinha (`voice_on` acima de 1 desliga isso: aumentava a voz falsa).
-    fn default() -> Self { Self { voiced: 0.7, conf: 0.6, max_aper: 0.4, voice_on: 2.0, voice_off: 0.5, min_aper_off: 0.1, agree_st: 1.0 } }
+    fn default() -> Self { Self { voiced: 0.7, conf: 0.6, max_aper: 0.4, voice_on: 2.0, voice_off: 0.8, min_aper_off: 0.08, agree_st: 1.0, net_pitch: 2.0 } }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -420,6 +423,15 @@ impl PitchTracker {
                     self.net_overrides += chosen.is_some() as u64;
                     switched = chosen.is_some();
                     chosen = Some((tf, v));
+                } else if chosen.is_some() && n.conf > fu.net_pitch {
+                    // nenhum vale do CMND perto da altura da rede (transicao rapida, reverb): vale a
+                    // altura da propria rede, com a aperiodicidade do CMND naquele periodo
+                    let tf = (self.sr / n.f0).clamp(2.0, self.tau_max as f32 - 1.0);
+                    let i = tf as usize;
+                    let v = self.cmnd[i] + (self.cmnd[i + 1] - self.cmnd[i]) * (tf - i as f32);
+                    self.net_overrides += 1;
+                    switched = true;
+                    chosen = Some((tf, v.min(fu.max_aper - 0.01)));
                 }
             }
         }

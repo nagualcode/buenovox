@@ -1,0 +1,14 @@
+uuid = "e1e4a4d4-8164-45a7-8d40-50c1566bd07d"
+name = "Lyric"
+category = "Natural"
+comment = "Classical and musical theatre: light touch, vibrato and portamento untouched."
+
+[params]
+style = 0
+amount = 0.6
+speed = 60.0
+tighten = 0.05
+vibrato = 1.0
+vib_create = 0.0
+scoop = 0.1
+breath = 1.0

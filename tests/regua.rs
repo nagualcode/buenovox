@@ -7,6 +7,8 @@ use buenovox::dsp::pitch::PitchTracker;
 use buenovox::dsp::testsig::{render, Rendered, SingerSpec, SungNote};
 use buenovox::dsp::{Engine, EngineParams, LatencyMode, Source, Style};
 
+fn rms_db(x: &[f32]) -> f32 { 10.0 * (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32 + 1e-12).log10() }
+
 const SR: f32 = 48_000.0;
 
 fn hz_to_midi(f: f32) -> f32 { 69.0 + 12.0 * (f / 440.0).log2() }
@@ -598,4 +600,73 @@ fn live_stays_aligned_with_large_blocks() {
         println!("ao vivo, blocos de {block}: SNR sem correcao {snr:.1} dB");
         assert!(snr > 40.0, "{snr}");
     }
+}
+
+#[test]
+fn large_shifts_keep_level_and_no_clicks() {
+    // voz reta em C4 corrigida pelo MIDI de C3 a C5 (-12 a +12 semitons), meio segundo cada
+    for mode in [LatencyMode::Studio, LatencyMode::Live] {
+    let notes = vec![SungNote::new(60.0, 0.0, 13.0)];
+    let mut spec = SingerSpec::new(48000.0, notes); spec.fine_cents = 0.0;
+    let r = render(&spec);
+    let start = r.spans[0].start;
+    let mut p = EngineParams { key: 0, scale: 0, ..Default::default() };
+    p.source = Source::MidiTarget; p.brain.style = Style::Hard;
+    let mut e = Engine::new(48000.0, mode);
+    let l = e.latency(); let mut x = r.audio.clone(); x.resize(r.audio.len() + l, 0.0);
+    let mut o = vec![0.0; x.len()]; let mut o2 = o.clone();
+    let seg = 24000usize;
+    let mut cur: Option<u8> = None;
+    for (bi, ((a, b), c)) in x.chunks(128).zip(o.chunks_mut(128)).zip(o2.chunks_mut(128)).enumerate() {
+        e.set_params(&p);
+        let pos = bi * 128;
+        if pos >= start { let k = ((pos - start) / seg).min(24) as u8; let note = 48 + k; if cur != Some(note) { if let Some(n) = cur { e.note_off(0, n); } e.note_on(0, note); cur = Some(note); } }
+        e.process(a, a, b, c);
+    }
+    let o = &o[l..];
+    let mut worst_env = 0.0f32; let mut worst_click = 0.0f32;
+    for k in 0..25 {
+        let a = start + k * seg + 6000; let b = start + (k + 1) * seg - 2400;
+        if b > o.len() || b > r.audio.len() { break; }
+        let env = rms_db(&o[a..b]) - rms_db(&r.audio[a..b]);
+        // cliques: maior salto de amostra para amostra em relacao ao tipico
+        let d: Vec<f32> = o[a..b].windows(2).map(|w| (w[1] - w[0]).abs()).collect();
+        let mut s = d.clone(); s.sort_by(f32::total_cmp);
+        let click = d.iter().fold(0.0f32, |m, &v| m.max(v)) / s[s.len() * 99 / 100].max(1e-9);
+        worst_env = worst_env.max(env.abs()); worst_click = worst_click.max(click);
+        print!("{:+}st:{:+.1}dB/{:.1} ", k as i32 - 12, env, click);
+    }
+    println!("\n{mode:?}: pior desvio de envelope {worst_env:.2} dB, pior salto/percentil99 {worst_click:.2}");
+    // o volume acompanha a entrada (o grao curto do ao vivo perde um pouco mais) e nao ha
+    // cliques: o maior salto entre amostras fica perto dos saltos tipicos
+    assert!(worst_env < if mode == LatencyMode::Live { 1.5 } else { 1.0 }, "{mode:?}: envelope {worst_env}");
+    assert!(worst_click < 2.0, "{mode:?}: clique {worst_click}");
+    }
+}
+
+#[test]
+fn classic_retune_overshoots_like_a_singer() {
+    // nota reta cantada 40 cents abaixo, depois de silencio: o retune de 2a ordem leva a voz ao
+    // alvo passando um pouco dele (overshoot medido em cantores reais) e assenta
+    let notes = vec![SungNote::new(60.0, -40.0, 1.2)];
+    let mut spec = SingerSpec::new(SR, notes);
+    spec.scoop_st = 0.0;
+    spec.fine_cents = 0.0;
+    let r = render(&spec);
+    let mut p = c_major();
+    p.brain.style = Style::Classic;
+    p.brain.speed_ms = 80.0;
+    p.brain.humanize = 0.0;
+    let (out, _) = run(&r.audio, SR, LatencyMode::Studio, &p, 512, &no_midi);
+    let tout = measure(&out, SR);
+    let hop = (SR * 0.004) as usize;
+    let k0 = r.spans[0].start / hop;
+    let first: Vec<f32> = tout[k0..k0 + 100].iter().copied().filter(|x| x.is_finite()).collect();
+    let peak = first.iter().fold(f32::MIN, |m, &x| m.max(x));
+    let late: Vec<f32> = tout[k0 + 150..k0 + 250].iter().copied().filter(|x| x.is_finite()).collect();
+    let (settled, _) = mean_std(&late);
+    let over = 100.0 * (peak - 60.0);
+    println!("Classic 80 ms: pico {over:+.1} c acima do alvo (erro inicial 40 c), assentado em {:+.1} c", 100.0 * (settled - 60.0));
+    assert!(over > 2.0 && over < 15.0, "overshoot {over}");
+    assert!((settled - 60.0).abs() < 0.03);
 }

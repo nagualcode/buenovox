@@ -1,0 +1,14 @@
+uuid = "a69f7714-0168-43c7-991c-6b0a14484239"
+name = "Bossa Intimate"
+category = "Natural"
+comment = "Bossa nova and soft jazz: gentle partial correction, a bit more air."
+
+[params]
+style = 0
+amount = 0.75
+speed = 40.0
+tighten = 0.1
+vibrato = 1.0
+vib_create = 0.0
+scoop = 0.15
+breath = 1.2

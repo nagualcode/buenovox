@@ -1,0 +1,14 @@
+uuid = "18879296-02b4-41bf-9ae3-3685f00b1199"
+name = "Gospel and R&B"
+category = "Natural"
+comment = "Fast response for runs and melisma, light drift control."
+
+[params]
+style = 0
+amount = 0.85
+speed = 10.0
+tighten = 0.15
+vibrato = 1.0
+vib_create = 0.0
+scoop = 0.2
+breath = 1.0

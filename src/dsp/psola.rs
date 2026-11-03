@@ -65,6 +65,11 @@ pub struct GrainVoice {
     /// demais).
     pub starved: u64,
     in_voiced: bool,
+    /// Passo dado com o periodo estimado (marca, passo usado, razao), a acertar.
+    guess: Option<(f64, f64, f64)>,
+    /// A janela da direita do grao anterior (amostras) e se ela foi encurtada pelo limite.
+    prev_right: f64,
+    prev_capped: bool,
     /// Maior meia janela de analise (amostras): no modo ao vivo limita o futuro que cada grao
     /// precisa ler (vozes graves ganham graos mais curtos que o periodo).
     pub max_half: f64,
@@ -74,7 +79,7 @@ pub struct GrainVoice {
 pub fn max_half_len(sr: f32) -> f64 { (sr / super::pitch::F0_MIN) as f64 / FORMANT_MIN as f64 + 4.0 }
 
 /// Meia janela maxima do grao no modo ao vivo (s).
-pub const LIVE_MAX_HALF: f64 = 0.005;
+pub const LIVE_MAX_HALF: f64 = 0.0035;
 
 impl GrainVoice {
     pub fn new() -> Self {
@@ -86,6 +91,9 @@ impl GrainVoice {
             emitted: 0,
             starved: 0,
             in_voiced: false,
+            guess: None,
+            prev_right: 0.0,
+            prev_capped: false,
             max_half: f64::INFINITY,
         }
     }
@@ -94,9 +102,15 @@ impl GrainVoice {
     /// analise para tras e para a frente (distancias reais ate as marcas vizinhas) e o passo ate
     /// a proxima marca.
     fn voiced_mark(&self, marks: &MarkTracker, c: f64) -> Option<(super::marks::Mark, f64, f64, f32)> {
-        let (m, half, fwd, _) = marks.nearest_cycle(c);
+        self.voiced_mark_k(marks, c).map(|(m, b, f, fwd, _)| (m, b, f, fwd))
+    }
+
+    /// Como `voiced_mark`, dizendo tambem se a marca seguinte ja existia (senao o passo e uma
+    /// estimativa).
+    fn voiced_mark_k(&self, marks: &MarkTracker, c: f64) -> Option<(super::marks::Mark, f64, f64, f32, bool)> {
+        let (m, half, fwd, known) = marks.nearest_cycle(c);
         let back = 2.0 * half as f64 - fwd as f64;
-        (m.voiced && (m.pos - c).abs() < 1.5 * m.period as f64).then(|| (m, back.min(self.max_half), (fwd as f64).min(self.max_half), fwd))
+        (m.voiced && (m.pos - c).abs() < 1.5 * m.period as f64).then(|| (m, back.min(self.max_half), (fwd as f64).min(self.max_half), fwd, known))
     }
 
     /// Planeja e soma no acumulador todos os graos com centro antes de `until`.
@@ -114,8 +128,20 @@ impl GrainVoice {
             self.started = true;
         }
         while self.next_center < until {
+            // o passo anterior saiu da ultima marca conhecida, com o periodo estimado: agora que a
+            // marca seguinte existe, o erro da estimativa e devolvido (sem isso a sintese perde a
+            // trava das marcas de analise e a voz inteira sai deslocada no tempo, o que acontece
+            // muito com latencia curta no modo ao vivo)
+            if let Some((mp, used, ratio)) = self.guess.take() {
+                if let Some(actual) = marks.next_voiced_after(mp + 1.0) {
+                    let err = (actual - mp) - used;
+                    if err.abs() < 0.4 * used {
+                        self.next_center = (self.next_center + err / ratio).max(self.prev_center + 8.0);
+                    }
+                }
+            }
             let c = self.next_center;
-            if let Some((m, h_back, h_fwd, fwd)) = self.voiced_mark(marks, c) {
+            if let Some((m, h_back, h_fwd, fwd, known)) = self.voiced_mark_k(marks, c) {
                 let h_src = 0.5 * (h_back + h_fwd);
                 // as marcas do inicio da nota chegaram depois que o plano ja tinha passado da
                 // borda (modo ao vivo, blocos grandes): um grao sem correcao faz a ponte ate a
@@ -124,6 +150,8 @@ impl GrainVoice {
                 if !self.in_voiced && (m.pos - c).abs() > 1.0 {
                     if let Some(t) = marks.next_voiced_after(c + 8.0).filter(|&t| t - c <= hop + 2.0 * h_src) {
                         self.add_grain(c, c, c - self.prev_center, t - c, 1.0, 1.0, input, hann);
+                        self.prev_capped = false;
+                        self.prev_right = t - c;
                         self.prev_center = c;
                         self.next_center = t;
                         continue;
@@ -134,18 +162,36 @@ impl GrainVoice {
                 let phi = st.formant.clamp(FORMANT_MIN, FORMANT_MAX) as f64;
                 let ps = (fwd as f64 / ratio).max(8.0);
                 let next = c + ps;
-                let left = if self.in_voiced { h_back / phi } else { c - self.prev_center };
-                let right = if self.voiced_mark(marks, next).is_some() { h_fwd / phi } else { ps };
+                let next_voiced = self.voiced_mark(marks, next).is_some();
+                let right = if next_voiced { h_fwd / phi } else { ps };
+                // grao limitado (ao vivo, voz grave): a janela da direita do grao anterior acabou
+                // antes deste centro. O lado do passado nao custa latencia, entao a janela deste
+                // grao vai ate o grao anterior, sobe junto com a descida dele e fica em 1 ate o
+                // centro: as janelas somam 1 e nao ha buracos (nem perda de energia).
+                let (left, taper) = if self.in_voiced && self.prev_capped {
+                    (c - self.prev_center, self.prev_right)
+                } else if self.in_voiced {
+                    (h_back / phi, h_back / phi)
+                } else {
+                    (c - self.prev_center, c - self.prev_center)
+                };
                 // normalizacao de potencia: densidade de graos e duracao do grao
-                let norm = ((ps * phi) / fwd as f64).sqrt().clamp(0.4, 2.0) as f32;
-                self.add_grain(c, m.pos, left, right, phi, norm, input, hann);
+                let norm = if self.prev_capped || h_fwd < fwd as f64 - 0.5 { 1.0 } else { ((ps * phi) / fwd as f64).sqrt().clamp(0.4, 2.0) as f32 };
+                self.add_grain_t(c, m.pos, left, taper, right, phi, norm, input, hann);
+                self.prev_capped = next_voiced && h_fwd < fwd as f64 - 0.5;
+                self.prev_right = right;
+                if !known {
+                    self.guess = Some((m.pos, fwd as f64, ratio));
+                }
                 self.in_voiced = true;
                 self.prev_center = c;
                 self.next_center = next;
             } else {
                 // fome = as marcas ainda nao chegaram ate aqui (uma marca vozeada longe e so uma
                 // lacuna real, como um salto grande de registro)
-                if marks.latest_pos() < c {
+                // (no fim de um trecho sem voz a grade de 5 ms pode ficar um pouco atras: ali o grao
+                // le a propria entrada e nao precisa de marca)
+                if marks.latest_pos() < c && marks.count() > 0 && marks.get(marks.count() - 1).voiced {
                     self.starved += 1;
                 }
                 let mut next = c + hop;
@@ -160,6 +206,8 @@ impl GrainVoice {
                 }
                 let left = if self.in_voiced { c - self.prev_center } else { hop };
                 self.add_grain(c, c, left, next - c, 1.0, 1.0, input, hann);
+                self.prev_capped = false;
+                self.prev_right = next - c;
                 self.in_voiced = false;
                 self.prev_center = c;
                 self.next_center = next;
@@ -172,15 +220,26 @@ impl GrainVoice {
     #[allow(clippy::too_many_arguments)]
     #[inline]
     fn add_grain(&mut self, c: f64, src: f64, left: f64, right: f64, phi: f64, g: f32, input: &mut impl GrainSource, hann: &HannTable) {
+        self.add_grain_t(c, src, left, left, right, phi, g, input, hann);
+    }
+
+    /// Como `add_grain`, com a subida da esquerda mais curta que a meia janela (`taper <= left`):
+    /// a janela sobe em `taper` amostras a partir de `c - left` e fica em 1 ate o centro.
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    fn add_grain_t(&mut self, c: f64, src: f64, left: f64, taper: f64, right: f64, phi: f64, g: f32, input: &mut impl GrainSource, hann: &HannTable) {
         let (left, right) = (left.max(1.0), right.max(1.0));
+        let taper = taper.clamp(1.0, left);
         input.prepare((src + right * phi).ceil() as i64 + 3);
         let input = input.ring();
         let n0 = ((c - left).ceil() as i64).max(self.emitted);
         let n1 = (c + right).floor() as i64;
-        let (il, ir) = ((1.0 / left) as f32, (1.0 / right) as f32);
+        let (it, ir) = ((1.0 / taper) as f32, (1.0 / right) as f32);
+        // a subida termina em `c - left + taper`; dali ate o centro a janela e 1
+        let flat = left - taper;
         for n in n0..=n1 {
             let dn = n as f64 - c;
-            let w = hann.w(dn as f32 * if dn < 0.0 { il } else { ir });
+            let w = if dn < 0.0 { hann.w(((dn + flat).min(0.0)) as f32 * it) } else { hann.w(dn as f32 * ir) };
             let x = input.interp(src + dn * phi);
             self.acc.add(n, g * w * x);
         }

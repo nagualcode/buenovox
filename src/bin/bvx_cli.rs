@@ -8,6 +8,7 @@
 //!   midi="0-2:60;2-4:62,65"   notas MIDI seguradas por intervalo de tempo (segundos)
 //!   dump=curvas.csv           tempo, altura de entrada, alvo, saida, deslocamento (por quadro)
 //!   compensate=1              remove a latencia do arquivo de saida (padrao 1)
+//!   mid=notas.mid             transcreve as notas decididas pelo cerebro (MIDI, 120 bpm)
 //!
 //! bvx_cli gen <saida.wav> [detune=cents] [vibrato=cents] [breath=0.01] [sr=48000]
 //!   gera uma frase sintetica (C D E F G, desafinada alternadamente) com f0 conhecido
@@ -116,6 +117,68 @@ fn gen(args: &[String]) {
     }
 }
 
+/// Notas a partir da decisao do cerebro quadro a quadro: trechos com a mesma nota, buracos de
+/// ate 24 ms costurados, notas com menos de 60 ms descartadas. (inicio s, fim s, nota)
+fn notes_from_frames(track: &[(f64, Option<u8>)]) -> Vec<(f64, f64, u8)> {
+    let mut out: Vec<(f64, f64, u8)> = Vec::new();
+    let mut cur: Option<(f64, f64, u8)> = None;
+    for &(t, n) in track {
+        match (cur, n) {
+            (Some((a, _, cn)), Some(n)) if n == cn => cur = Some((a, t, cn)),
+            (Some((a, b, cn)), Some(n)) if t - b > 0.024 || n != cn => {
+                out.push((a, b, cn));
+                cur = Some((t, t, n));
+            }
+            (None, Some(n)) => cur = Some((t, t, n)),
+            (Some((a, b, cn)), None) if t - b > 0.024 => {
+                out.push((a, b, cn));
+                cur = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(c) = cur {
+        out.push(c);
+    }
+    out.retain(|&(a, b, _)| b - a >= 0.06);
+    out
+}
+
+/// MIDI padrao, formato 0, 120 bpm, 480 pulsos por semínima (960 por segundo).
+fn write_midi(path: &str, notes: &[(f64, f64, u8)]) {
+    let vlq = |mut v: u32, out: &mut Vec<u8>| {
+        let mut bytes = vec![(v & 0x7F) as u8];
+        v >>= 7;
+        while v > 0 {
+            bytes.push(((v & 0x7F) as u8) | 0x80);
+            v >>= 7;
+        }
+        out.extend(bytes.iter().rev());
+    };
+    let mut ev: Vec<(u32, u8, u8)> = Vec::new(); // tick, status, nota
+    for &(a, b, n) in notes {
+        ev.push(((a * 960.0).round() as u32, 0x90, n));
+        ev.push(((b * 960.0).round() as u32, 0x80, n));
+    }
+    ev.sort_by_key(|&(t, st, _)| (t, st));
+    let mut trk = vec![0x00, 0xFF, 0x51, 0x03, 0x07, 0xA1, 0x20];
+    let mut last = 0;
+    for (t, st, n) in ev {
+        vlq(t - last, &mut trk);
+        last = t;
+        trk.extend([st, n, if st == 0x90 { 90 } else { 0 }]);
+    }
+    trk.extend([0x00, 0xFF, 0x2F, 0x00]);
+    let mut f = Vec::new();
+    f.extend(b"MThd");
+    f.extend(6u32.to_be_bytes());
+    f.extend([0, 0, 0, 1, 0x01, 0xE0]);
+    f.extend(b"MTrk");
+    f.extend((trk.len() as u32).to_be_bytes());
+    f.extend(trk);
+    std::fs::write(path, f).expect("nao gravou o MIDI");
+}
+
 /// Quadros de analise de `x`: [tempo (s), rotulo (Hz, -1 = desconhecido), f0 decidido (Hz),
 /// aperiodicidade, nivel (dB), f0 da rede, voz da rede, entradas da rede...].
 fn frames(x: &[f32], sr: f32, label: Option<&[f32]>, net: Option<&[u8]>, fusion: Option<buenovox::dsp::pitch::Fusion>, stride: u64, out: &mut Vec<f32>) {
@@ -204,7 +267,7 @@ fn features(args: &[String]) {
     let net = o.get("net").map(|p| std::fs::read(p).expect("nao leu os pesos"));
     let fusion = o.get("fusion").map(|v| {
         let f: Vec<f32> = v.split(',').map(|x| x.parse().unwrap()).collect();
-        buenovox::dsp::pitch::Fusion { voiced: f[0], conf: f[1], max_aper: f[2], voice_on: f[3], voice_off: f[4], min_aper_off: f[5], agree_st: f.get(6).copied().unwrap_or(1.0) }
+        buenovox::dsp::pitch::Fusion { voiced: f[0], conf: f[1], max_aper: f[2], voice_on: f[3], voice_off: f[4], min_aper_off: f[5], agree_st: f.get(6).copied().unwrap_or(1.0), net_pitch: f.get(7).copied().unwrap_or(2.0) }
     });
     let stride: u64 = o.get("stride").map_or(1, |v| v.parse().unwrap());
     let mut data = Vec::new();
@@ -234,6 +297,7 @@ fn main() {
     let mut block = 512usize;
     let mut midi = Vec::new();
     let mut dump: Option<String> = None;
+    let mut mid: Option<String> = None;
     let mut compensate = true;
     for a in &args[2..] {
         let (k, v) = a.split_once('=').expect("use chave=valor");
@@ -281,6 +345,7 @@ fn main() {
             "block" => block = v.parse().unwrap(),
             "midi" => midi = parse_midi(v),
             "dump" => dump = Some(v.to_string()),
+            "mid" => mid = Some(v.to_string()),
             "compensate" => compensate = v != "0",
             _ => panic!("chave desconhecida: {k}"),
         }
@@ -301,6 +366,8 @@ fn main() {
     let t0 = Instant::now();
     let mut pos = 0;
     let mut dumped = 0u64;
+    let mut notes_seen = 0u64;
+    let mut track: Vec<(f64, Option<u8>)> = Vec::new();
     while pos < total {
         let m = block.min(total - pos);
         e.set_params(&p);
@@ -343,12 +410,24 @@ fn main() {
             }
             dumped = e.frame_count();
         }
+        if mid.is_some() {
+            for (t, mt) in e.frames_from(notes_seen) {
+                let note = (mt.input > 0.0 && mt.target.is_finite()).then(|| mt.target.round().clamp(0.0, 127.0) as u8);
+                track.push((t / sr as f64, note));
+            }
+            notes_seen = e.frame_count();
+        }
         pos += m;
     }
     let el = t0.elapsed().as_secs_f64();
     let audio_s = n as f64 / sr as f64;
     let (ol, or) = if compensate { (&out_l[lat..], &out_r[lat..]) } else { (&out_l[..], &out_r[..]) };
     write_wav(&args[1], ol, or, sr);
+    if let Some(path) = &mid {
+        let notes = notes_from_frames(&track);
+        write_midi(path, &notes);
+        eprintln!("{} notas em {path}", notes.len());
+    }
     eprintln!(
         "{:.2}s de audio em {:.3}s ({:.0}x tempo real), latencia {} amostras ({:.1} ms), fome {}",
         audio_s,

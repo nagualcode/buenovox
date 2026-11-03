@@ -69,7 +69,7 @@ impl LatencyMode {
 }
 
 /// Latencia do modo ao vivo (s).
-pub const LIVE_LATENCY: f64 = 0.018;
+pub const LIVE_LATENCY: f64 = 0.011;
 
 /// Parametros do motor (lidos do host a cada bloco).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -147,7 +147,10 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(sr: f32, mode: LatencyMode) -> Self {
+    pub fn new(sr: f32, mode: LatencyMode) -> Self { Self::with_live(sr, mode, LIVE_LATENCY, LIVE_MAX_HALF) }
+
+    /// Como `new`, com a latencia e a meia janela maxima do grao do modo ao vivo escolhidas (s).
+    pub fn with_live(sr: f32, mode: LatencyMode, live_latency: f64, live_half: f64) -> Self {
         let sr = sr.max(8000.0);
         let mut pitch = PitchTracker::new(sr);
         // a rede fica carregada; o parametro so liga e desliga (sem alocar no audio)
@@ -165,7 +168,7 @@ impl Engine {
         let need_ctrl = lag + half + lookahead + hop as f64;
         let live = mode == LatencyMode::Live;
         let latency = if live {
-            (LIVE_LATENCY * sr as f64).round() as usize
+            (live_latency * sr as f64).round() as usize
         } else {
             (need_marks.max(need_ctrl) + 2.0 * hop as f64 + 0.5 * period + 64.0).ceil() as usize
         };
@@ -173,7 +176,7 @@ impl Engine {
         marks.live = live;
         let mut voice = GrainVoice::new();
         if live {
-            voice.max_half = LIVE_MAX_HALF * sr as f64;
+            voice.max_half = live_half * sr as f64;
         }
         Self {
             sr,
@@ -199,7 +202,7 @@ impl Engine {
             frame_count: 0,
             brain: Brain::new(sr, hop, lookahead),
             voice,
-            breath: BreathSplit::new(sr, b_past, b_fut),
+            breath: BreathSplit::with_fir(sr, b_past, b_fut, if live { super::breath::SPLIT_HALF_LIVE } else { super::breath::SPLIT_HALF }),
             wet: 1.0,
             air: 1.0,
             starved_ctrl: std::cell::Cell::new(0),

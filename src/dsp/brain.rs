@@ -115,6 +115,12 @@ impl Default for CtrlFrame {
 const CENTER_WIN: f64 = 0.36;
 /// Janela do centro curto (s): ~1 ciclo de vibrato.
 const SHORT_WIN: f64 = 0.18;
+// Sem lookahead (ao vivo) as decisoes de troca de nota so olham o passado: janelas e transicoes
+// mais curtas (medido no vocadito com as notas anotadas como alvo: erro mediano 16 -> 12 cents).
+const LIVE_SHORT_WIN: f64 = 0.06;
+const LIVE_TRANS: f32 = 0.05;
+const LIVE_AWAY: f32 = 0.05;
+const LIVE_HOLD: f32 = 0.12;
 /// Duracao tipica do ataque de uma nota (s).
 const ATTACK: f64 = 0.08;
 /// Antecipacao/atraso tolerados nas trocas de nota MIDI e acorde (s).
@@ -126,6 +132,8 @@ pub struct Brain {
     dt: f32,
     /// Lookahead disponivel (amostras).
     la: f64,
+    /// Tempo segurando o alvo antigo depois de uma troca no meio da nota (s).
+    target_hold: f32,
     /// Horizonte da "nota em que o cantor vai chegar" (amostras).
     fut: f64,
 
@@ -158,6 +166,8 @@ pub struct Brain {
     // retune (Classic/Hard)
     cl1: f32,
     cl2: f32,
+    /// Amortecimento do retune do Classic (do ultimo intervalo).
+    cl_zeta: f32,
 
     // vibrato
     vib_ms: f32,
@@ -173,6 +183,7 @@ impl Brain {
             hop: hop as f64,
             dt: hop as f32 / sr,
             la: lookahead,
+            target_hold: 0.0,
             fut: lookahead.min(0.03 * sr as f64),
             anchor: None,
             seg_start: 0.0,
@@ -196,6 +207,7 @@ impl Brain {
             o_a: 0.0,
             cl1: 0.0,
             cl2: 0.0,
+            cl_zeta: 0.55,
             vib_ms: 0.0,
             vib_phase: 0.0,
             rate_drift: Drift::new(1.0, 0.8),
@@ -211,6 +223,9 @@ impl Brain {
 
     /// Limiar de saida da nota (semitons): cresce com o vibrato medido, para os picos do
     /// vibrato nao parecerem uma nota nova.
+    /// Sem lookahead (modo ao vivo): as decisoes so podem olhar o passado.
+    fn live(&self) -> bool { self.la < 0.02 * self.sr as f64 }
+
     fn leave_threshold(&self) -> f32 { (0.6 + 1.3 * self.vib_ms.sqrt()).min(1.4) }
 
     /// Mediana das alturas vozeadas nos quadros `j0..=j1` (em hops a partir de `t`), se houver
@@ -245,7 +260,8 @@ impl Brain {
     /// cancela o vibrato (resta ~15% da extensao entre 5 e 6.5 Hz) e responde rapido a um passo
     /// de nota: o meio da subida do centro cai no instante do passo.
     fn short_center(&self, t: f64, tc: f64, pt: &PitchTracker, a4: f32) -> Option<f32> {
-        let half = (SHORT_WIN * 0.5 * self.sr as f64 / self.hop).floor() as i32;
+        let win = if self.live() { LIVE_SHORT_WIN } else { SHORT_WIN };
+        let half = (win * 0.5 * self.sr as f64 / self.hop).floor() as i32;
         let limit = t + self.la;
         let (mut s, mut n) = (0.0f32, 0u32);
         for j in -half..=half {
@@ -304,6 +320,7 @@ impl Brain {
         self.stability = 0.0;
         self.away_time = 0.0;
         self.target = None;
+        self.target_hold = 0.0;
         self.vib_phase = 0.0;
     }
 
@@ -335,8 +352,15 @@ impl Brain {
 
         // ------------------------------------------------------------ segmentacao
         if voiced {
+            let gap = self.unvoiced_time;
             self.unvoiced_time = 0.0;
             let thr = self.leave_threshold();
+            // a voz volta de uma pausa curta (respiracao, consoante) ja longe da nota anterior:
+            // e outra nota, desde o primeiro quadro (sem isso o primeiro quadro herdaria o alvo
+            // da nota anterior e daria um pulo de altura de alguns milissegundos)
+            if gap >= 0.012 && self.anchor.is_some_and(|an| (pm - an).abs() > thr) && !octave_suspect {
+                self.anchor = None;
+            }
             match self.anchor {
                 None => {
                     // inicio de frase: a altura em que a voz assenta nos proximos ~100 ms
@@ -382,7 +406,7 @@ impl Brain {
                         // deriva longa para longe (passagens rapidas, sem pouso claro a frente)
                         if (pm - an).abs() > thr + 0.2 {
                             self.away_time += dt;
-                            if self.away_time > 0.1 {
+                            if self.away_time > if self.live() { LIVE_AWAY } else { 0.1 } {
                                 new_anchor = Some(pm);
                             }
                         } else {
@@ -460,7 +484,28 @@ impl Brain {
 
         // uma so decisao de nota para todos os estilos: o centro da nota (ataque com peso baixo,
         // lookahead), com histerese. Os estilos diferem so em COMO a voz chega ao alvo.
-        let tn = choose_target(cn, &ctxs, self.target, 0.12);
+        let mut tn = choose_target(cn, &ctxs, self.target, 0.12);
+        // o alvo mudou no meio da nota (MIDI trocou antes do cantor): enquanto o cantor ainda
+        // estiver mais perto do alvo antigo, ele vale por ate `hold` (o tempo de a segmentacao
+        // perceber a troca). Sem isso o novo intervalo seria aplicado sobre a nota antiga.
+        if let (Some(old), Some(new)) = (self.target, tn) {
+            let hold = if self.live() { LIVE_HOLD } else { 0.0 };
+            let closer_old = (old as f32 - cn).abs() + 0.5 < (new as f32 - cn).abs();
+            if new != old && closer_old && self.target_hold < hold {
+                self.target_hold += dt;
+                tn = Some(old);
+            } else if new == old {
+                self.target_hold = 0.0;
+            }
+        }
+        if let (Some(a), Some(b)) = (self.target, tn) {
+            if a != b {
+                // amortecimento medido por intervalo (train/transitions.py): passos pequenos
+                // passam mais do alvo, subindo mais que descendo
+                let iv = b as f32 - a as f32;
+                self.cl_zeta = if iv.abs() < 2.5 { if iv > 0.0 { 0.47 } else { 0.52 } } else { 0.63 };
+            }
+        }
         self.target = tn;
         let Some(tn) = tn else {
             return self.pass(pm);
@@ -478,10 +523,10 @@ impl Brain {
                         // migra enquanto ele completa a subida (~90 ms)
                         let cs = self.short_center(t, t, pt, a4).unwrap_or(cn);
                         let pc = if span.abs() > 0.05 { ((cs - self.p0) / span).clamp(0.0, 1.0) } else { 1.0 };
-                        ((pc - 0.5) * 2.0).max(self.trans_time / 0.15)
+                        ((pc - 0.5) * 2.0).max(self.trans_time / if self.live() { LIVE_TRANS } else { 0.15 })
                     } else {
                         let pitch_prog = if span.abs() > 0.05 { ((pm - self.p0) / span).clamp(0.0, 1.0) } else { 1.0 };
-                        pitch_prog.max(self.trans_time / 0.2)
+                        pitch_prog.max(self.trans_time / if self.live() { 1.33 * LIVE_TRANS } else { 0.2 })
                     };
                     let prog = prog.clamp(0.0, 1.0);
                     self.o = self.o_a + (o_target - self.o_a) * smoothstep(prog);
@@ -524,12 +569,22 @@ impl Brain {
                     p.speed_ms / 1000.0 * (1.0 + 3.0 * p.humanize * smoothstep((self.time_in_note - 0.1) / 0.5))
                 };
                 if tc < 0.002 {
-                    self.cl1 = c;
+                    self.cl1 = 0.0;
                     self.cl2 = c;
                 } else {
-                    let a = 1.0 - (-dt / (0.5 * tc)).exp();
-                    self.cl1 += (c - self.cl1) * a;
-                    self.cl2 += (self.cl1 - self.cl2) * a;
+                    // retune de 2a ordem subamortecido (Saitou), com o amortecimento medido em
+                    // 2454 transicoes reais do VocalSet: a voz passa um pouco do alvo e assenta,
+                    // como um cantor, em vez de chegar numa curva exponencial. Speed = tempo de
+                    // subida de 10% a 90%. cl2 = correcao, cl1 = sua velocidade.
+                    let z = self.cl_zeta;
+                    let wn = (1.0 - 0.4167 * z + 2.917 * z * z) / tc;
+                    let n = ((wn * dt / 0.15).ceil() as usize).clamp(1, 64);
+                    let h = dt / n as f32;
+                    for _ in 0..n {
+                        let acc = wn * wn * (c - self.cl2) - 2.0 * z * wn * self.cl1;
+                        self.cl1 += acc * h;
+                        self.cl2 += self.cl1 * h;
+                    }
                 }
                 pm + self.cl2 + if hard { 0.0 } else { p.amount * s * vib_mod }
             }

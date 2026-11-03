@@ -183,6 +183,70 @@ impl BuenoGui {
         }
     }
 
+    /// Uma oitava: notas da escala (claras), notas MIDI seguradas (azul), a nota cantada (contorno)
+    /// e a nota alvo (cor de destaque).
+    fn keyboard(&self, ui: &mut egui::Ui, state: &Ctx, width: f32) {
+        let params = state.params();
+        let scale = scale_mask(params.key.index() as u8, params.scale.index() as u8);
+        let held = state.get_meter(P::MeterMidi) as u16;
+        let pc = |m: f32| (m > 0.0).then(|| (m.round() as i32).rem_euclid(12) as usize);
+        let sung = pc(state.get_meter(P::MeterPitchIn));
+        let target = pc(state.get_meter(P::MeterTarget)).filter(|_| sung.is_some());
+        let h = 46.0;
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(width, h), Sense::hover());
+        let p = ui.painter();
+        let ww = width / 7.0;
+        let white = [0usize, 2, 4, 5, 7, 9, 11];
+        let black = [(1usize, 1.0f32), (3, 2.0), (6, 4.0), (8, 5.0), (10, 6.0)];
+        let fill = |n: usize, base: Color32| {
+            if target == Some(n) {
+                ACCENT
+            } else if held >> n & 1 == 1 {
+                TARGET
+            } else if scale >> n & 1 == 1 {
+                base
+            } else {
+                CELL
+            }
+        };
+        for (i, &n) in white.iter().enumerate() {
+            let r = Rect::from_min_size(Pos2::new(rect.left() + i as f32 * ww, rect.top()), Vec2::new(ww - 1.0, h));
+            p.rect_filled(r, CornerRadius::same(2), fill(n, Color32::from_rgb(200, 200, 205)));
+            if sung == Some(n) {
+                p.rect_stroke(r.shrink(1.0), CornerRadius::same(2), Stroke::new(2.0_f32, TEXT), egui::StrokeKind::Inside);
+            }
+            p.text(Pos2::new(r.center().x, r.bottom() - 3.0), Align2::CENTER_BOTTOM, NOTE_NAMES[n], FontId::proportional(9.0), DARK_TEXT);
+        }
+        for &(n, x) in &black {
+            let r = Rect::from_min_size(Pos2::new(rect.left() + x * ww - ww * 0.3, rect.top()), Vec2::new(ww * 0.6, h * 0.58));
+            p.rect_filled(r, CornerRadius::same(2), fill(n, Color32::from_rgb(90, 90, 96)));
+            if sung == Some(n) {
+                p.rect_stroke(r.shrink(1.0), CornerRadius::same(2), Stroke::new(2.0_f32, TEXT), egui::StrokeKind::Inside);
+            }
+        }
+    }
+
+    /// Grade de latencia: AUTO, LIVE, TRACK, STUDIO (o Auto e o ultimo valor do parametro).
+    fn latency_grid(&self, ui: &mut egui::Ui, state: &Ctx, width: f32) {
+        let id: u32 = P::Latency.into();
+        let cur = state.params().latency.index() as usize;
+        let items = [(3usize, "AUTO"), (0, "LIVE"), (1, "TRACK"), (2, "STUDIO")];
+        let cw = (width - 3.0 * 2.0) / 4.0;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for (v, label) in items {
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(cw, 20.0), Sense::click());
+                let on = cur == v;
+                let fill = if on { ACCENT } else if resp.hovered() { CELL_HI } else { CELL };
+                ui.painter().rect_filled(rect, CornerRadius::same(2), fill);
+                ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, FontId::proportional(10.5), if on { DARK_TEXT } else { TEXT });
+                if resp.clicked() {
+                    self.set_plain(state, id, v as f64);
+                }
+            }
+        });
+    }
+
     fn toggle(&self, ui: &mut egui::Ui, state: &Ctx, id: u32, label: &str, width: f32) {
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 20.0), Sense::click());
         let on = state.get_param(id) > 0.5;
@@ -247,6 +311,9 @@ impl BuenoGui {
             self.knob(ui, state, P::A4.into(), "A4", false, true);
             self.knob(ui, state, P::BendRange.into(), "BEND", false, midi);
         });
+        ui.add_space(6.0);
+        caption(ui, "NOTES");
+        self.keyboard(ui, state, w);
         ui.add_space(6.0);
         caption(ui, "DETECTION");
         self.toggle(ui, state, P::Neural.into(), "NEURAL ASSIST", w);
@@ -351,21 +418,22 @@ impl BuenoGui {
         ui.add_space(4.0);
         caption(ui, "LATENCY");
         let w = ui.available_width();
-        self.grid(ui, state, P::Latency.into(), &["LIVE", "TRACK", "STUDIO"], 3, w, 20.0, ACCENT);
+        // a grade mostra AUTO primeiro; o parametro guarda Live=0, Track=1, Studio=2, Auto=3
+        self.latency_grid(ui, state, w);
         let chosen = state.params().latency.index() as usize;
-        let active = (state.get_meter(P::MeterMode).round() as usize).checked_sub(1).unwrap_or(chosen);
-        if active != chosen {
-            hint(ui, "Restart playback or reload to apply.");
-        } else {
-            hint(
-                ui,
-                match active {
-                    0 => "Live: 18 ms, for singing on stage.",
-                    1 => "Track: for recording with monitoring.",
-                    _ => "Studio: sees each note before tuning it.",
-                },
-            );
-        }
+        let meter = state.get_meter(P::MeterMode).round() as usize;
+        let auto = meter >= 10;
+        let active = (meter % 10).checked_sub(1);
+        let text = match (chosen, active) {
+            (3, Some(0)) if auto => "Auto: Live now (monitoring, 11 ms).".to_string(),
+            (3, Some(_)) if auto => "Auto: Studio now (playback/bounce).".to_string(),
+            (3, _) => "Auto: Live when monitoring, Studio on playback.".to_string(),
+            (c, Some(a)) if c != a => "Restart playback or reload to apply.".to_string(),
+            (0, _) => "Live: 11 ms, for singing on stage.".to_string(),
+            (1, _) => "Track: for recording with monitoring.".to_string(),
+            _ => "Studio: sees each note before tuning it.".to_string(),
+        };
+        hint(ui, &text);
     }
 }
 

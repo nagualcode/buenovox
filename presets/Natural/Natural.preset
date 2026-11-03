@@ -1,0 +1,16 @@
+uuid = "29cb73a6-3a38-43de-ad56-0a95ca463d9a"
+name = "Natural"
+category = "Natural"
+comment = "Default: moves each whole note to pitch, keeps vibrato, attack and air."
+default = true
+
+[params]
+style = 0
+amount = 1.0
+speed = 25.0
+tighten = 0.2
+vibrato = 1.0
+vib_create = 0.0
+scoop = 0.3
+throat = 0.0
+breath = 1.0
