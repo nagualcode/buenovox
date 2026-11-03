@@ -29,6 +29,21 @@ impl Default for VoiceState {
     fn default() -> Self { Self { ratio: 1.0, formant: 1.0 } }
 }
 
+/// De onde os graos leem: a voz inteira ou so a parte harmonica (separada sob demanda).
+pub trait GrainSource {
+    /// Garante o sinal ate `upto` (exclusivo).
+    fn prepare(&mut self, upto: i64);
+    fn ring(&self) -> &Ring;
+}
+
+/// A propria entrada.
+pub struct Plain<'a>(pub &'a Ring);
+
+impl GrainSource for Plain<'_> {
+    fn prepare(&mut self, _upto: i64) {}
+    fn ring(&self) -> &Ring { self.0 }
+}
+
 pub trait VoiceControl {
     /// Estado da voz no instante de origem `s` (o material que o grao vai ler). `src_period` e
     /// o periodo real do ciclo naquele ponto (amostras), para alvos absolutos (Hard).
@@ -75,19 +90,23 @@ impl GrainVoice {
         }
     }
 
-    /// Ha uma marca vozeada utilizavel perto de `c`? Devolve a marca e a meia janela de analise.
-    fn voiced_mark(&self, marks: &MarkTracker, c: f64) -> Option<(super::marks::Mark, f64, f32)> {
+    /// Ha uma marca vozeada utilizavel perto de `c`? Devolve a marca, as meias janelas de
+    /// analise para tras e para a frente (distancias reais ate as marcas vizinhas) e o passo ate
+    /// a proxima marca.
+    fn voiced_mark(&self, marks: &MarkTracker, c: f64) -> Option<(super::marks::Mark, f64, f64, f32)> {
         let (m, half, fwd, _) = marks.nearest_cycle(c);
-        (m.voiced && (m.pos - c).abs() < 1.5 * m.period as f64).then(|| (m, (half as f64).min(self.max_half), fwd))
+        let back = 2.0 * half as f64 - fwd as f64;
+        (m.voiced && (m.pos - c).abs() < 1.5 * m.period as f64).then(|| (m, back.min(self.max_half), (fwd as f64).min(self.max_half), fwd))
     }
 
     /// Planeja e soma no acumulador todos os graos com centro antes de `until`.
     ///
-    /// Entre dois graos vozeados as janelas sao as do PSOLA (meia janela = periodo de analise).
-    /// Nas passagens entre trecho vozeado e sem vozeamento as meias janelas viram a distancia ate
+    /// Entre dois graos vozeados as meias janelas sao as distancias reais ate as marcas vizinhas
+    /// (assimetricas quando o periodo muda, como no vibrato): sem correcao as metades de Hann de
+    /// graos vizinhos se complementam e a reconstrucao e exata. Nas passagens entre trecho vozeado e sem vozeamento as meias janelas viram a distancia ate
     /// o grao vizinho, dos dois lados: as metades de Hann se complementam e a soma das janelas e
     /// exatamente 1 na fronteira (sem bolha nem buraco de nivel no inicio e no fim das notas).
-    pub fn plan(&mut self, until: f64, input: &Ring, marks: &MarkTracker, ctl: &impl VoiceControl, hann: &HannTable) {
+    pub fn plan(&mut self, until: f64, input: &mut impl GrainSource, marks: &MarkTracker, ctl: &impl VoiceControl, hann: &HannTable) {
         let hop = marks.uv_hop as f64;
         if !self.started {
             self.next_center = self.emitted as f64;
@@ -96,15 +115,27 @@ impl GrainVoice {
         }
         while self.next_center < until {
             let c = self.next_center;
-            if let Some((m, h_src, fwd)) = self.voiced_mark(marks, c) {
+            if let Some((m, h_back, h_fwd, fwd)) = self.voiced_mark(marks, c) {
+                let h_src = 0.5 * (h_back + h_fwd);
+                // as marcas do inicio da nota chegaram depois que o plano ja tinha passado da
+                // borda (modo ao vivo, blocos grandes): um grao sem correcao faz a ponte ate a
+                // proxima marca, para que os graos vozeados caiam sobre as marcas de analise.
+                // Sem isso o trecho todo sairia deslocado no tempo ate a proxima pausa.
+                if !self.in_voiced && (m.pos - c).abs() > 1.0 {
+                    if let Some(t) = marks.next_voiced_after(c + 8.0).filter(|&t| t - c <= hop + 2.0 * h_src) {
+                        self.add_grain(c, c, c - self.prev_center, t - c, 1.0, 1.0, input, hann);
+                        self.prev_center = c;
+                        self.next_center = t;
+                        continue;
+                    }
+                }
                 let st = ctl.state(c, fwd);
                 let ratio = st.ratio.clamp(0.25, 4.0) as f64;
                 let phi = st.formant.clamp(FORMANT_MIN, FORMANT_MAX) as f64;
-                let h_out = h_src / phi;
                 let ps = (fwd as f64 / ratio).max(8.0);
                 let next = c + ps;
-                let left = if self.in_voiced { h_out } else { c - self.prev_center };
-                let right = if self.voiced_mark(marks, next).is_some() { h_out } else { ps };
+                let left = if self.in_voiced { h_back / phi } else { c - self.prev_center };
+                let right = if self.voiced_mark(marks, next).is_some() { h_fwd / phi } else { ps };
                 // normalizacao de potencia: densidade de graos e duracao do grao
                 let norm = ((ps * phi) / fwd as f64).sqrt().clamp(0.4, 2.0) as f32;
                 self.add_grain(c, m.pos, left, right, phi, norm, input, hann);
@@ -120,7 +151,8 @@ impl GrainVoice {
                 let mut next = c + hop;
                 // vai comecar um trecho vozeado: o proximo grao cai sobre a marca de analise
                 // (sem correcao, a saida e a propria entrada, ciclo por ciclo)
-                if let Some((m, h_src, _)) = self.voiced_mark(marks, next) {
+                if let Some((m, h_back, h_fwd, _)) = self.voiced_mark(marks, next) {
+                    let h_src = 0.5 * (h_back + h_fwd);
                     let lead = m.pos - next;
                     if lead > -0.5 * h_src && lead <= h_src && m.pos > c + 8.0 {
                         next = m.pos;
@@ -139,8 +171,10 @@ impl GrainVoice {
     /// de saida `left` e `right` (amostras).
     #[allow(clippy::too_many_arguments)]
     #[inline]
-    fn add_grain(&mut self, c: f64, src: f64, left: f64, right: f64, phi: f64, g: f32, input: &Ring, hann: &HannTable) {
+    fn add_grain(&mut self, c: f64, src: f64, left: f64, right: f64, phi: f64, g: f32, input: &mut impl GrainSource, hann: &HannTable) {
         let (left, right) = (left.max(1.0), right.max(1.0));
+        input.prepare((src + right * phi).ceil() as i64 + 3);
+        let input = input.ring();
         let n0 = ((c - left).ceil() as i64).max(self.emitted);
         let n1 = (c + right).floor() as i64;
         let (il, ir) = ((1.0 / left) as f32, (1.0 / right) as f32);

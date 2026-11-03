@@ -439,3 +439,163 @@ fn survives_hostile_input() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------- respiracao
+
+/// Separa cada parte com as marcas e as receitas (alinhamento, ganhos) da mistura `mix`: com a
+/// receita fixa a separacao e linear, e cada componente verdadeira pode ser medida sozinha.
+fn split_with_marks(mix: &[f32], parts: &[&[f32]], past: f64, fut: f64, live: bool) -> Vec<(Vec<f32>, Vec<f32>)> {
+    use buenovox::dsp::breath::BreathSplit;
+    use buenovox::dsp::marks::MarkTracker;
+    use buenovox::dsp::util::Ring;
+    let mut pt = PitchTracker::new(SR);
+    let mut marks = MarkTracker::new(SR);
+    marks.live = live;
+    let mut rings: Vec<Ring> = parts.iter().map(|_| Ring::new(1 << 17)).collect();
+    let mut guide = Ring::new(1 << 17);
+    let mut splits: Vec<BreathSplit> = parts.iter().map(|_| BreathSplit::new(SR, past, fut)).collect();
+    let mut outs: Vec<(Vec<f32>, Vec<f32>)> = parts.iter().map(|_| (vec![0.0; mix.len()], vec![0.0; mix.len()])).collect();
+    let mut n = 0usize;
+    let mut taken = 0usize;
+    for chunk in mix.chunks(256) {
+        for (i, v) in chunk.iter().enumerate() {
+            guide.set((n + i) as i64, *v);
+        }
+        for (ri, r) in rings.iter_mut().enumerate() {
+            for i in 0..chunk.len() {
+                r.set((n + i) as i64, parts[ri][n + i]);
+            }
+        }
+        pt.push(chunk);
+        n += chunk.len();
+        marks.update(&pt, n as i64);
+        for (i, sp) in splits.iter_mut().enumerate() {
+            sp.advance_guided(&rings[i], &guide, &marks);
+            if live {
+                sp.ensure_guided(&rings[i], &guide, &marks, n as i64 - (0.012 * SR) as i64, n as i64);
+            }
+        }
+        let done = splits.iter().map(|s| s.done()).min().unwrap().max(0) as usize;
+        for t in taken..done {
+            for (i, sp) in splits.iter().enumerate() {
+                outs[i].0[t] = sp.harm.at(t as i64);
+                outs[i].1[t] = sp.noise.at(t as i64);
+            }
+        }
+        taken = done;
+    }
+    outs
+}
+
+fn energy_hp(x: &[f32], f: f64) -> f64 {
+    let mut a = buenovox::dsp::util::Biquad::highpass(SR as f64, f, 0.707);
+    let mut b = buenovox::dsp::util::Biquad::highpass(SR as f64, f, 0.707);
+    x.iter().map(|&v| (b.process(a.process(v)) as f64).powi(2)).sum()
+}
+
+#[test]
+fn breath_split_separates_air() {
+    // voz muito soprosa (HNR ~6 dB), com vibrato: o ar deve sair da parte harmonica sem levar
+    // harmonicos junto (o "fantasma" da nota antiga, que passaria sem correcao)
+    let notes = vec![
+        SungNote::new(57.0, 0.0, 1.0).vibrato(5.5, 40.0),
+        SungNote::new(64.0, 0.0, 1.0).vibrato(5.5, 40.0).gap(0.2),
+        SungNote::new(69.0, 0.0, 1.0).vibrato(5.5, 40.0),
+        SungNote::new(72.0, 0.0, 1.0),
+    ];
+    let mut spec = SingerSpec::new(SR, notes);
+    spec.breath = 0.15;
+    let r = render(&spec);
+    let hnr = 10.0 * (energy_hp(&r.harmonic, 50.0) / energy_hp(&r.aspiration, 50.0)).log10();
+    println!("HNR da entrada: {hnr:.1} dB");
+    // alcances da media de ciclos de cada modo (como no motor)
+    for (name, past, fut, live, max_air) in [("Studio", 0.035, 0.035, false, -12.0), ("Track", 0.035, 0.010, false, -10.0), ("Live", 0.030, 0.0, true, -8.0)] {
+        // a separacao e linear com as marcas fixas: cada componente verdadeira e separada sozinha
+        let o = split_with_marks(&r.audio, &[&r.harmonic, &r.aspiration], past, fut, live);
+        let (_, ghost) = &o[0];
+        let (air_left, _) = &o[1];
+        let ghost_db = 10.0 * (energy_hp(ghost, 50.0) / energy_hp(&r.harmonic, 50.0)).log10();
+        let air_db = 10.0 * (energy_hp(air_left, 2000.0) / energy_hp(&r.aspiration, 2000.0)).log10();
+        println!("{name}: harmonico no ruido (fantasma) {ghost_db:.1} dB, ar que fica na parte corrigida (> 2 kHz) {air_db:.1} dB");
+        assert!(ghost_db < -22.0, "{name}: fantasma {ghost_db}");
+        assert!(air_db < max_air, "{name}: ar {air_db}");
+    }
+}
+
+/// Relacao harmonico/ruido acima de 2 kHz, medida pela propria media de ciclos (Studio).
+fn hnr_hf(x: &[f32]) -> f64 {
+    let o = split_with_marks(x, &[x], 0.035, 0.035, false);
+    let (h, n) = &o[0];
+    10.0 * (energy_hp(h, 2000.0) / energy_hp(n, 2000.0)).log10()
+}
+
+#[test]
+fn breath_stays_air_when_shifted() {
+    // voz soprosa cantando 60, MIDI pede 64: o PSOLA repete ciclos e, sem a separacao, o ar
+    // repetido ganha a periodicidade da nota nova (zumbido)
+    let notes = vec![SungNote::new(60.0, 0.0, 1.6).vibrato(5.5, 30.0)];
+    let mut spec = SingerSpec::new(SR, notes);
+    spec.breath = 0.08;
+    let r = render(&spec);
+    let mut p = c_major();
+    p.source = Source::MidiTarget;
+    let midi = |e: &mut Engine, pos: usize, _m: usize| {
+        if pos == 0 {
+            e.note_on(0, 64);
+        }
+    };
+    let h_in = hnr_hf(&r.audio);
+    p.breath_split = false;
+    let (off, _) = run(&r.audio, SR, LatencyMode::Studio, &p, 512, &midi);
+    p.breath_split = true;
+    let (on, starved) = run(&r.audio, SR, LatencyMode::Studio, &p, 512, &midi);
+    assert_eq!(starved, 0);
+    let (h_off, h_on) = (hnr_hf(&off), hnr_hf(&on));
+    println!("HNR > 2 kHz: entrada {h_in:.1} dB, saida sem separacao {h_off:.1} dB, com separacao {h_on:.1} dB");
+    // o ar continua ar: a saida separada fica perto da entrada, e mais perto que a sem separacao
+    assert!((h_on - h_in).abs() + 1.0 < (h_off - h_in).abs(), "separacao nao ajudou");
+}
+
+#[test]
+fn breath_knob_sets_the_air() {
+    // sem correcao: Breath 1 = a propria voz; 0 tira o ar, 2 dobra
+    let notes = vec![SungNote::new(62.0, 0.0, 1.2).vibrato(5.5, 30.0)];
+    let mut spec = SingerSpec::new(SR, notes);
+    spec.breath = 0.08;
+    let r = render(&spec);
+    let mut p = c_major();
+    p.brain.amount = 0.0;
+    let air = |b: f32| {
+        let mut p = p;
+        p.breath = b;
+        let (out, _) = run(&r.audio, SR, LatencyMode::Studio, &p, 512, &no_midi);
+        // o ar que sobra = saida - harmonica verdadeira, acima de 2 kHz
+        let d: Vec<f32> = out.iter().zip(&r.harmonic).map(|(o, h)| o - h).collect();
+        10.0 * (energy_hp(&d, 2000.0) / energy_hp(&r.aspiration, 2000.0)).log10()
+    };
+    let (a0, a1, a2) = (air(0.0), air(1.0), air(2.0));
+    println!("ar acima de 2 kHz em relacao ao original: Breath 0 {a0:+.1} dB, 1 {a1:+.1} dB, 2 {a2:+.1} dB");
+    assert!(a1.abs() < 0.2);
+    assert!(a0 < -8.0);
+    assert!(a2 > 4.0 && a2 < 7.0);
+}
+
+#[test]
+fn live_stays_aligned_with_large_blocks() {
+    // as marcas do inicio de nota chegam atrasadas ao vivo; com blocos grandes o plano de graos
+    // ja passou da borda e precisa reencontrar as marcas (senao a nota inteira sai deslocada)
+    let r = phrase(0.0, 40.0);
+    let mut p = c_major();
+    p.brain.amount = 0.0;
+    for block in [512usize, 1024] {
+        let (out, _) = run(&r.audio, SR, LatencyMode::Live, &p, block, &no_midi);
+        let (mut se, mut ss) = (0.0f64, 0.0f64);
+        for (o, i) in out.iter().zip(&r.audio).skip(12000) {
+            se += ((o - i) as f64).powi(2);
+            ss += (*i as f64).powi(2);
+        }
+        let snr = 10.0 * (ss / se.max(1e-20)).log10();
+        println!("ao vivo, blocos de {block}: SNR sem correcao {snr:.1} dB");
+        assert!(snr > 40.0, "{snr}");
+    }
+}

@@ -81,6 +81,12 @@ pub mod truce_integration {
         #[param(name = "Create Vibrato", range = "linear(0, 1)", default = 0.0, unit = "%")] pub vib_create: FloatParam,
         #[param(name = "Scoop", range = "linear(0, 1)", default = 0.3, unit = "%")] pub scoop: FloatParam,
         #[param(name = "Throat", range = "linear(-1, 1)", default = 0.0, unit = "%")] pub throat: FloatParam,
+        /// Nivel do ar (respiracao) separado da parte afinada.
+        #[param(name = "Breath", range = "linear(0, 2)", default = 1.0, unit = "%")] pub breath: FloatParam,
+        /// Separa o ar antes do PSOLA (so a parte harmonica e corrigida).
+        #[param(name = "Air Split", default = true)] pub breath_split: BoolParam,
+        /// Detector neural de apoio (oitava e vozeamento).
+        #[param(name = "Neural Assist", default = true)] pub neural: BoolParam,
         #[param(name = "Pure Tuning", default = false)] pub pure: BoolParam,
         #[param(name = "A4", range = "linear(415, 466)", default = 440.0, unit = "Hz")] pub a4: FloatParam,
         #[param(name = "Bend Range", range = "linear(0, 12)", default = 2)] pub bend_range: IntParam,
@@ -124,6 +130,9 @@ pub mod truce_integration {
                 pure: self.pure.value(),
                 bend_range: self.bend_range.value_i32() as f32,
                 throat: self.throat.read(),
+                breath_split: self.breath_split.value(),
+                breath: self.breath.read(),
+                neural: self.neural.value(),
                 bypass: self.bypass.value(),
             }
         }

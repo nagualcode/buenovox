@@ -2,3 +2,8 @@ target/
 *.wav
 *.csv
 .DS_Store
+train/.venv/
+train/data/
+train/runs/
+__pycache__/
+dist/

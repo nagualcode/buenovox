@@ -2,13 +2,16 @@
 //! testes).
 
 pub mod brain;
+pub mod breath;
 pub mod engine;
 pub mod marks;
+pub mod neural;
 pub mod pitch;
 pub mod psola;
 pub mod testsig;
 pub mod tonal;
 pub mod util;
+pub mod voicegen;
 
 pub use brain::{BrainParams, Style};
 pub use engine::{Engine, EngineParams, LatencyMode};

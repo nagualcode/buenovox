@@ -10,9 +10,10 @@
 //! sobre a silaba cantada naquele ponto.
 
 use super::brain::{Brain, BrainParams, CtrlFrame};
+use super::breath::BreathSplit;
 use super::marks::MarkTracker;
 use super::pitch::{PitchTracker, F0_MIN};
-use super::psola::{max_half_len, GrainVoice, VoiceControl, VoiceState, FORMANT_MIN, LIVE_MAX_HALF};
+use super::psola::{max_half_len, GrainSource, GrainVoice, Plain, VoiceControl, VoiceState, FORMANT_MIN, LIVE_MAX_HALF};
 use super::tonal::{Ctx, Source};
 use super::util::{HannTable, Ring};
 
@@ -49,6 +50,15 @@ impl LatencyMode {
         }
     }
 
+    /// Alcance da media de ciclos da separacao da respiracao (s): para tras, para a frente.
+    fn breath_span(self) -> (f64, f64) {
+        match self {
+            Self::Live => (0.030, 0.0),
+            Self::Track => (0.035, 0.010),
+            Self::Studio => (0.035, 0.035),
+        }
+    }
+
     fn lookahead_s(self) -> f64 {
         match self {
             Self::Live => 0.0,
@@ -73,6 +83,12 @@ pub struct EngineParams {
     pub bend_range: f32,
     /// Garganta -1..1 (negativo = mais longa, voz mais escura).
     pub throat: f32,
+    /// Separa a respiracao: so a parte harmonica e corrigida, o ar passa sem mudar de altura.
+    pub breath_split: bool,
+    /// Nivel do ar separado (0..2; 1 = natural).
+    pub breath: f32,
+    /// Detector neural de apoio: arbitra oitava e vozeamento junto com o YIN.
+    pub neural: bool,
     pub bypass: bool,
 }
 
@@ -86,6 +102,9 @@ impl Default for EngineParams {
             pure: false,
             bend_range: 2.0,
             throat: 0.0,
+            breath_split: true,
+            breath: 1.0,
+            neural: true,
             bypass: false,
         }
     }
@@ -117,7 +136,9 @@ pub struct Engine {
     frame_count: u64,
     brain: Brain,
     voice: GrainVoice,
+    breath: BreathSplit,
     wet: f32,
+    air: f32,
 
     /// Quadros de controle pedidos antes de existirem (latencia curta demais).
     starved_ctrl: std::cell::Cell<u64>,
@@ -128,7 +149,9 @@ pub struct Engine {
 impl Engine {
     pub fn new(sr: f32, mode: LatencyMode) -> Self {
         let sr = sr.max(8000.0);
-        let pitch = PitchTracker::new(sr);
+        let mut pitch = PitchTracker::new(sr);
+        // a rede fica carregada; o parametro so liga e desliga (sem alocar no audio)
+        pitch.set_neural(true);
         let hop = pitch.hop;
         let lookahead = (mode.lookahead_s() * sr as f64).round();
         // Latencia minima: o quadro de altura mais recente fica `analysis_lag` atras da entrada;
@@ -137,7 +160,8 @@ impl Engine {
         let lag = (pitch.analysis_lag() as f64) - 0.5 * pitch.window() as f64 + 2.0 * hop as f64;
         let period = sr as f64 / F0_MIN as f64;
         let half = max_half_len(sr);
-        let need_marks = lag + period + half;
+        let (b_past, b_fut) = mode.breath_span();
+        let need_marks = lag + period + half + b_fut * sr as f64 + super::breath::SPLIT_HALF * sr as f64;
         let need_ctrl = lag + half + lookahead + hop as f64;
         let live = mode == LatencyMode::Live;
         let latency = if live {
@@ -175,7 +199,9 @@ impl Engine {
             frame_count: 0,
             brain: Brain::new(sr, hop, lookahead),
             voice,
+            breath: BreathSplit::new(sr, b_past, b_fut),
             wet: 1.0,
+            air: 1.0,
             starved_ctrl: std::cell::Cell::new(0),
             meter: CtrlFrame::default(),
         }
@@ -190,7 +216,11 @@ impl Engine {
     pub fn pitch_tracker(&self) -> &PitchTracker { &self.pitch }
 
     /// Quantas vezes o motor precisou de informacao que ainda nao existia (deve ser 0).
-    pub fn starved(&self) -> u64 { self.starved_ctrl.get() + self.voice.starved }
+    pub fn starved(&self) -> u64 {
+        // ao vivo a separacao nao espera os ciclos futuros (nao e fome)
+        let split = if self.mode == LatencyMode::Live { 0 } else { self.breath.provisional };
+        self.starved_ctrl.get() + self.voice.starved + split
+    }
 
     fn ctx_now(&self) -> Ctx {
         let p = &self.params;
@@ -225,6 +255,7 @@ impl Engine {
     /// Atualiza os parametros no inicio do bloco.
     pub fn set_params(&mut self, p: &EngineParams) {
         self.params = *p;
+        self.pitch.use_net = p.neural;
         self.push_ctx(self.n_in);
     }
 
@@ -300,6 +331,11 @@ impl Engine {
         self.mono = mono;
         self.n_in += n as i64;
         self.marks.update(&self.pitch, self.n_in);
+        if self.params.breath_split {
+            self.breath.advance(&self.input, &self.marks);
+        } else {
+            self.breath.bypass(&self.input, self.n_in);
+        }
 
         // quadros de controle
         let hop = self.hop as f64;
@@ -320,15 +356,30 @@ impl Engine {
         let tau_end = (n0 + n as i64 - lat) as f64;
         let until = tau_end + self.plan_ahead();
         let mut voice = std::mem::take(&mut self.voice);
-        voice.plan(until, &self.input, &self.marks, &Ctl { e: self }, &self.hann);
+        let mut breath = std::mem::take(&mut self.breath);
+        let split = self.params.breath_split;
+        {
+            let ctl = Ctl { e: self };
+            if split {
+                let mut src = Split { b: &mut breath, x: &self.input, marks: &self.marks, avail: self.n_in };
+                voice.plan(until, &mut src, &self.marks, &ctl, &self.hann);
+            } else {
+                voice.plan(until, &mut Plain(&self.input), &self.marks, &ctl, &self.hann);
+            }
+        }
+        breath.ensure(&self.input, &self.marks, tau_end as i64 + 1, self.n_in);
         self.voice = voice;
+        self.breath = breath;
 
-        // saida: voz corrigida (mono) nos dois canais; bypass cruza para o seco atrasado
+        // saida: voz corrigida (mono) nos dois canais, mais o ar que passou ao lado do PSOLA;
+        // bypass cruza para o seco atrasado
         let wet_t = if self.params.bypass { 0.0 } else { 1.0 };
+        let air_t = if split { self.params.breath.clamp(0.0, 2.0) } else { 0.0 };
         let a = 1.0 - (-1.0 / (0.01 * self.sr)).exp();
         for i in 0..n {
             let tau = n0 + i as i64 - lat;
-            let y = self.voice.take(tau);
+            self.air += (air_t - self.air) * a;
+            let y = self.voice.take(tau) + self.air * self.breath.noise.at(tau);
             self.wet += (wet_t - self.wet) * a;
             let (wet, dry) = (self.wet, 1.0 - self.wet);
             out_l[i] = wet * y + dry * self.dry_l.at(tau);
@@ -393,6 +444,19 @@ fn ctx_at(events: &[(i64, Ctx)], t: f64, fallback: Ctx) -> Ctx {
         }
     }
     events.first().map_or(fallback, |(_, c)| *c)
+}
+
+/// Graos lendo so a parte harmonica, separada sob demanda.
+struct Split<'a> {
+    b: &'a mut BreathSplit,
+    x: &'a Ring,
+    marks: &'a super::marks::MarkTracker,
+    avail: i64,
+}
+
+impl GrainSource for Split<'_> {
+    fn prepare(&mut self, upto: i64) { self.b.ensure(self.x, self.marks, upto, self.avail); }
+    fn ring(&self) -> &Ring { &self.b.harm }
 }
 
 /// Visao do motor para o shifter.

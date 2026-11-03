@@ -13,9 +13,22 @@ A research project for personal, non-commercial use and the study of the craft. 
 > the distraction.
 
 BuenoVOX **corrects only the perceived center of each note and gives everything else back
-untouched**: vibrato, attack, drift, micro-fluctuations and the singer's cycle-to-cycle jitter.
+untouched**: vibrato, attack, drift, micro-fluctuations, the singer's cycle-to-cycle jitter and
+the air in the voice.
 
 ---
+
+## Installation (release, Audio Unit, Apple Silicon)
+
+1. Download `BuenoVOX-<version>-AU-macOS-arm64.zip` from
+   [Releases](https://github.com/nagualcode/buenovox/releases) and unzip it.
+2. Move `BuenoVOX.component` to `~/Library/Audio/Plug-Ins/Components/`.
+3. The build is ad-hoc signed (no Apple developer certificate), so clear the quarantine flag:
+   ```bash
+   xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/BuenoVOX.component
+   ```
+4. Restart your DAW (in Logic, the plugin manager rescans it; `auval -v aumf BVox JdSn` checks
+   it from the terminal).
 
 ## Installation (from source)
 
@@ -57,10 +70,18 @@ Restart your DAW. In Live: *Plug-Ins → Audio Units → Jardim Sonoro → Bueno
    * **Vibrato**: 0–200% of the singer's vibrato.
    * **Create Vib**: adds vibrato to long straight notes, fading in slowly.
    * **Throat**: longer throat (darker voice) or shorter (brighter).
-6. **Tuning:**
+6. **Air:**
+   * **Air Split** (on by default): the breath noise is separated from the voice before
+     correction and passes around it at its original pitch. Only the harmonic part is retuned,
+     so a breathy voice does not turn buzzy.
+   * **Breath**: level of the separated air, 0–200% (100% = as sung).
+7. **Detection:**
+   * **Neural Assist** (on by default): a small network checks the pitch detector's octave and
+     voicing decisions (see below).
+8. **Tuning:**
    * **Pure Tuning**: just intonation relative to the lowest held MIDI note (or the tonic).
    * **A4**: reference from 415 to 466 Hz.
-7. **Latency**, reported to the host (Live compensates on playback):
+9. **Latency**, reported to the host (Live compensates on playback):
    * **STUDIO** (~270 ms): the brain sees ~190 ms ahead, almost the whole note, before
      correcting it. For mixing.
    * **TRACK** (~95 ms): for recording with monitoring.
@@ -93,6 +114,20 @@ input ─► YIN (f0 every 4 ms) ─► epoch marks (one per glottal cycle)
 
 * **Detector:** the YIN tracker inherited from [Heaven](https://github.com/nagualcode/heaven),
   with continuity-based candidates, octave tests, a register gate and a 3-frame median.
+* **Neural assist:** a small convolutional network (4.8k parameters, ~0.7% of a core) looks at
+  the same 32 ms of signal as YIN and arbitrates the cases where YIN fails: octave errors in
+  vocal fry, belting with subharmonics, closed vowels with a strong 2nd harmonic, thin mics,
+  reverb. Its inputs lie on a log-pitch axis (2 positions per semitone, 62–1080 Hz): YIN's
+  periodicity `1 − CMND(sr/f)`, the spectrum read at f/2, f, 2f, 3f, 4f and 5f, and the level.
+  Everything is in Hz and seconds, so the network does not depend on the sample rate. When it is
+  confident of another pitch, the CMND valley near it wins (precision stays YIN's). It also
+  vetoes voicing that YIN finds only weakly periodic. It never declares voice on its own (that
+  raised false voicing on real singing). Trained in PyTorch (`train/`) on synthetic source-filter
+  voices with known f0 (`src/dsp/voicegen.rs`) plus 2.6 h of
+  [VocalSet](https://zenodo.org/records/1442513) (fry, breathy, belt, lip trill, vibrato...)
+  labelled by CREPE as a teacher, from 18 singers (two more held out for testing); inference hand-written in Rust with the weights
+  embedded, no allocations; a test checks it against PyTorch (largest probability difference
+  2·10⁻⁶).
 * **Segmentation by movement, not by rounding.** In a pitch corrector the singer is off center
   by definition, and with vibrato the peaks would cross the semitone boundary every cycle. A
   new note starts:
@@ -108,7 +143,23 @@ input ─► YIN (f0 every 4 ms) ─► epoch marks (one per glottal cycle)
 * **Ratio PSOLA:** grains are re-placed at the real spacing between analysis marks divided by
   the correction ratio. The singer's natural jitter reaches the output, and without correction
   the synthesis marks stay locked to the analysis marks: the output is the input itself, cycle
-  by cycle.
+  by cycle. Each grain's half-windows are the real distances to the neighboring marks, so they
+  sum to exactly 1 even when the period changes (vibrato).
+* **Breath separation:** PSOLA treats each cycle as if it were all periodic. In a breathy voice
+  the air noise is cut into grains and repeated at the new period: it takes on the pitch of the
+  corrected note and turns into a metallic buzz. BuenoVOX separates it first:
+  * the **harmonic part** is the average of neighboring cycles, aligned on the epoch marks (each
+    cycle is the vocal tract's response to one glottal pulse, so the neighbor is read at the same
+    distance from its own mark, without time-stretching). What repeats cycle after cycle stays;
+    the noise, which does not repeat, falls with the number of cycles;
+  * each neighbor is re-aligned to the current cycle by fractional broadband correlation and
+    scaled by the energy ratio, because noise shifts the marks by fractions of a sample and notes
+    change level at the attack and release;
+  * the **air** is `voice − harmonic` above 1 kHz, through a linear-phase FIR (below 1 kHz the
+    residual is mostly model error, which would sound like a ghost of the old note);
+  * the corrected path reads `voice − air`, so without correction the two parts add back to the
+    voice sample for sample. Averaging span: ±35 ms in Studio, −35/+10 ms in Track, past-only
+    30 ms in Live.
 
 ## The ruler
 
@@ -141,10 +192,35 @@ legato, a legato half step and rests:
 
 Other figures:
 * **Detector:** **0.27 cent** median error, 0% gross errors.
-* **PSOLA with no correction:** **55 dB** SNR against the dry signal in Studio and **62 dB** in
-  Live (the waveform, not just the timbre). Across voiced/unvoiced boundaries the grain
-  half-windows equal the distance to the neighboring grain on each side, so the windows sum to
-  exactly 1.
+* **Neural assist on real singing** ([vocadito](https://zenodo.org/records/5578807), 40 solo
+  excerpts with human f0 annotation, never used in training), frame by frame:
+
+  | | Pitch within 50 cents | Gross errors | Octave errors | Voice found | False voice |
+  |---|---|---|---|---|---|
+  | YIN alone | 94.3% | 3.23% | 1.03% | 97.5% | 21.1% |
+  | YIN + network | **95.1%** | **2.63%** | **0.39%** | **97.7%** | **18.9%** |
+
+  On held-out synthetic hard voices (fry, belt, breathy, thin mic, reverb, noise): gross errors
+  13.4% → 5.2%, octave errors 10.1% → 2.4%, voice found 91.2% → 91.8%. On two held-out VocalSet
+  singers, against CREPE labels: octave errors 1.10% → 0.50% overall, vocal fry 3.8% → 1.5%,
+  belt 0.6% → 0%.
+* **PSOLA with no correction:** **87 dB** SNR against the dry signal in Studio and **98 dB** in
+  Live, with breath separation on (the waveform, not just the timbre).
+* **Breath separation**, on a very breathy synthetic voice (harmonic-to-noise ratio 6 dB, 40-cent
+  vibrato), each true component separated on its own with the mixture's recipe:
+
+  | | Harmonic leaking into the air path ("ghost") | Air left in the corrected path (> 2 kHz) |
+  |---|---|---|
+  | Studio | −24 dB | −13 dB |
+  | Track | −24 dB | −12 dB |
+  | Live | −24 dB | −10 dB |
+
+  Breathy voice shifted up 4 semitones by MIDI: the high-band harmonic-to-noise ratio measured on
+  the output is 7.8 dB without separation (the air became periodic) and 6.0 dB with it, against
+  5.6 dB on the input. **Breath** at 0% removes 12 dB of air; at 200% adds 5.6 dB.
+* **Live with large host buffers:** after a rest, the first marks of a note arrive after the grain
+  plan has passed the onset; a bridging grain re-locks the plan to the marks (before this fix,
+  with 512- or 1024-sample buffers the rest of the note came out up to 5 ms shifted).
 * **Low voice in Live** (A2, 110 Hz, capped grains): corrected within 8 cents, energy within
   1.2 dB.
 * **Bypass:** identical to the delayed dry signal.
@@ -153,7 +229,9 @@ Other figures:
 * **Pitch bend:** +0.5 st → 60.499.
 * **Robustness:** no data starvation at 44.1, 48 or 96 kHz in any mode; survives silence, noise,
   impulses, clipping and NaN.
-* **Performance:** ~100× real time at 48 kHz and ~40× at 96 kHz in Studio.
+* **Performance:** in Studio with breath separation, ~53× real time at 48 kHz and ~31× at 96
+  kHz; Live ~82× at 48 kHz. Neural assist adds ~7 ms per second of audio (Studio 42×, Live 52×
+  at 48 kHz with everything on).
 * **Validators:** passes **auval** (AU v2 and v3) and **pluginval** (VST3).
 
 ## Development
@@ -165,6 +243,16 @@ target/release/bvx_cli gen phrase.wav detune=35 vibrato=40  # synthetic singer
 target/release/bvx_cli vocal.wav out.wav key=C scale=major style=natural dump=curves.csv
 target/release/bvx_cli vocal.wav out.wav source=miditarget midi="0-2:60;2-4:62"
 cargo truce screenshot --out docs/gui.png
+```
+
+Neural detector (Python only for training; the plugin has no Python or ONNX dependency):
+
+```bash
+target/release/bvx_cli dataset train/data/synth/s1.bin seed=1 files=34 stride=3   # synthetic frames
+python train/teacher.py train/data/teacher <VocalSet wavs>   # CREPE labels (or train/teacher_all.sh)
+cd train && python train.py runs/net.bin --vocalset --epochs 4   # train, validate on vocadito
+./eval_fused.sh runs/net.bin                            # YIN+network vs annotations
+python check.py runs/net.bin.pt ../models/pitchnet_check.bin   # PyTorch reference for the Rust test
 ```
 
 `bvx_cli` runs the plugin's own engine offline. With `dump=` it writes, every 4 ms frame, the

@@ -2,7 +2,8 @@
 //!
 //! No centro, o grafico de afinacao rolando: a altura cantada (cinza), a corrigida (cor) e a nota
 //! alvo (faixa), sobre as linhas das notas permitidas. Em volta, poucos controles: de onde vem o
-//! alvo (TARGET), quanto e como corrigir (CORRECTION) e o que preservar ou criar (EXPRESSION).
+//! alvo (TARGET), quanto e como corrigir (CORRECTION), o que preservar ou criar (EXPRESSION) e o
+//! ar da voz, que passa ao lado da correcao (AIR).
 //! Tudo e parametro do host, entao tudo pode ser automatizado.
 
 use crate::dsp::tonal::{scale_mask, NOTE_NAMES, SCALE_NAMES};
@@ -15,7 +16,7 @@ use truce::prelude::*;
 use truce_egui::EditorUi;
 
 pub const WIDTH: u32 = 960;
-pub const HEIGHT: u32 = 440;
+pub const HEIGHT: u32 = 500;
 
 const BG: Color32 = Color32::from_rgb(28, 28, 30);
 const PANEL: Color32 = Color32::from_rgb(40, 40, 42);
@@ -246,6 +247,10 @@ impl BuenoGui {
             self.knob(ui, state, P::A4.into(), "A4", false, true);
             self.knob(ui, state, P::BendRange.into(), "BEND", false, midi);
         });
+        ui.add_space(6.0);
+        caption(ui, "DETECTION");
+        self.toggle(ui, state, P::Neural.into(), "NEURAL ASSIST", w);
+        hint(ui, "A small network checks octave and voicing.");
     }
 
     fn graph(&self, ui: &mut egui::Ui, state: &Ctx, rect: Rect) {
@@ -331,6 +336,17 @@ impl BuenoGui {
             self.knob(ui, state, P::Vibrato.into(), "VIBRATO", false, !hard);
             self.knob(ui, state, P::VibCreate.into(), "CREATE VIB", false, !hard);
             self.knob(ui, state, P::Throat.into(), "THROAT", true, true);
+        });
+        ui.add_space(4.0);
+        caption(ui, "AIR");
+        let split = state.params().breath_split.value();
+        ui.horizontal(|ui| {
+            self.knob(ui, state, P::Breath.into(), "BREATH", false, split);
+            ui.vertical(|ui| {
+                ui.add_space(14.0);
+                self.toggle(ui, state, P::BreathSplit.into(), "AIR SPLIT", 120.0);
+                hint(ui, if split { "Breath bypasses the tuning." } else { "Breath is tuned with the voice." });
+            });
         });
         ui.add_space(4.0);
         caption(ui, "LATENCY");

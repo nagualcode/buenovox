@@ -88,6 +88,9 @@ pub struct Rendered {
     /// Componente de vibrato verdadeira por amostra (semitons).
     pub vib: Vec<f32>,
     pub spans: Vec<NoteSpan>,
+    /// Componentes separadas (mesma escala de `audio`): harmonica e ruido de aspiracao.
+    pub harmonic: Vec<f32>,
+    pub aspiration: Vec<f32>,
 }
 
 pub fn render(spec: &SingerSpec) -> Rendered {
@@ -100,6 +103,8 @@ pub fn render(spec: &SingerSpec) -> Rendered {
     let mut audio = vec![0.0f32; len];
     let mut f0v = vec![0.0f32; len];
     let mut vibv = vec![0.0f32; len];
+    let mut harm = vec![0.0f32; len];
+    let mut asp = vec![0.0f32; len];
     let mut spans = Vec::new();
 
     // dinamica de 2a ordem (Saitou): overshoot nas transicoes ligadas
@@ -157,7 +162,9 @@ pub fn render(spec: &SingerSpec) -> Rendered {
                 }
                 s += env / k as f32 * ((k as f64 * phase).sin() as f32);
             }
-            audio[i] = amp * 0.05 * s + amp * spec.breath * rng.gauss();
+            harm[i] = amp * 0.05 * s;
+            asp[i] = amp * spec.breath * rng.gauss();
+            audio[i] = harm[i] + asp[i];
             i += 1;
         }
         let gap = (note.gap * sr) as usize;
@@ -167,8 +174,10 @@ pub fn render(spec: &SingerSpec) -> Rendered {
     let _ = fine;
     // normaliza o pico em -6 dBFS
     let peak = audio.iter().fold(0.0f32, |a, &s| a.max(s.abs())).max(1e-9);
-    for s in &mut audio {
-        *s *= 0.5 / peak;
+    for v in [&mut audio, &mut harm, &mut asp] {
+        for s in v.iter_mut() {
+            *s *= 0.5 / peak;
+        }
     }
-    Rendered { audio, f0: f0v, vib: vibv, spans }
+    Rendered { audio, f0: f0v, vib: vibv, spans, harmonic: harm, aspiration: asp }
 }

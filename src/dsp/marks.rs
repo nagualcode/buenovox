@@ -51,7 +51,14 @@ impl MarkTracker {
         self.last = m;
     }
 
-    fn get(&self, k: u64) -> &Mark { &self.marks[(k % CAP as u64) as usize] }
+    /// Marca de indice absoluto `k` (valida para `oldest() <= k < count()`).
+    pub fn get(&self, k: u64) -> &Mark { &self.marks[(k % CAP as u64) as usize] }
+
+    /// Numero de marcas ja geradas.
+    pub fn count(&self) -> u64 { self.count }
+
+    /// Indice da marca mais antiga ainda guardada.
+    pub fn oldest(&self) -> u64 { self.count.saturating_sub(CAP as u64 - 8) }
 
     pub fn latest_pos(&self) -> f64 { if self.count == 0 { f64::NEG_INFINITY } else { self.last.pos } }
 
@@ -92,8 +99,11 @@ impl MarkTracker {
                 if need as i64 >= avail {
                     break;
                 }
-                let tracked = if last.voiced && (p - last.period).abs() < 0.35 * p { refine_ncc(x, last.pos, guess, p) } else { None };
-                if (weak || (self.live && last.voiced)) && tracked.is_none() {
+                let similar = last.voiced && (p - last.period).abs() < 0.35 * p;
+                let tracked = if similar { refine_ncc(x, last.pos, guess, p) } else { None };
+                // a correlacao falhou com o periodo de sempre (corte abrupto, consoante): o trecho
+                // vozeado termina ali, em vez de recomecar num pico qualquer do silencio
+                if (weak || (self.live && last.voiced) || similar) && tracked.is_none() {
                     self.push(Mark { pos: guess, period: self.uv_hop, voiced: false, weak: false });
                     continue;
                 }
@@ -154,6 +164,25 @@ impl MarkTracker {
         let fwd = if b.voiced && ok(fwd) { fwd } else { m.period };
         let back = if a.voiced && ok(back) { back } else { m.period };
         (m, 0.5 * (back + fwd), fwd, true)
+    }
+
+    /// Posicao da primeira marca vozeada depois de `t`, se ja existir (olha poucas marcas).
+    pub fn next_voiced_after(&self, t: f64) -> Option<f64> {
+        if self.count == 0 {
+            return None;
+        }
+        let mut k = self.nearest_index(t);
+        for _ in 0..4 {
+            let m = self.get(k);
+            if m.pos > t {
+                return m.voiced.then_some(m.pos);
+            }
+            k += 1;
+            if k >= self.count {
+                break;
+            }
+        }
+        None
     }
 
     fn nearest_index(&self, s: f64) -> u64 {
