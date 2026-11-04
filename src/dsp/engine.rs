@@ -13,7 +13,7 @@ use super::brain::{Brain, BrainParams, CtrlFrame};
 use super::breath::BreathSplit;
 use super::marks::MarkTracker;
 use super::pitch::{PitchTracker, F0_MIN};
-use super::psola::{max_half_len, GrainSource, GrainVoice, Plain, VoiceControl, VoiceState, FORMANT_MIN, LIVE_MAX_HALF};
+use super::psola::{max_half_len, GrainSource, GrainVoice, Plain, VoiceControl, VoiceState, LIVE_FADE};
 use super::tonal::{Ctx, Source};
 use super::util::{HannTable, Ring};
 
@@ -69,7 +69,7 @@ impl LatencyMode {
 }
 
 /// Latencia do modo ao vivo (s).
-pub const LIVE_LATENCY: f64 = 0.011;
+pub const LIVE_LATENCY: f64 = 0.014;
 
 /// Parametros do motor (lidos do host a cada bloco).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -136,6 +136,9 @@ pub struct Engine {
     frame_count: u64,
     brain: Brain,
     voice: GrainVoice,
+    /// Quanto alem da saida os graos sao planejados no modo ao vivo (amostras).
+    live_plan: f64,
+    live_fir: i64,
     breath: BreathSplit,
     wet: f32,
     air: f32,
@@ -147,10 +150,10 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(sr: f32, mode: LatencyMode) -> Self { Self::with_live(sr, mode, LIVE_LATENCY, LIVE_MAX_HALF) }
+    pub fn new(sr: f32, mode: LatencyMode) -> Self { Self::with_live(sr, mode, LIVE_LATENCY) }
 
-    /// Como `new`, com a latencia e a meia janela maxima do grao do modo ao vivo escolhidas (s).
-    pub fn with_live(sr: f32, mode: LatencyMode, live_latency: f64, live_half: f64) -> Self {
+    /// Como `new`, com a latencia do modo ao vivo escolhida (s).
+    pub fn with_live(sr: f32, mode: LatencyMode, live_latency: f64) -> Self {
         let sr = sr.max(8000.0);
         let mut pitch = PitchTracker::new(sr);
         // a rede fica carregada; o parametro so liga e desliga (sem alocar no audio)
@@ -174,9 +177,17 @@ impl Engine {
         };
         let mut marks = MarkTracker::new(sr);
         marks.live = live;
-        let mut voice = GrainVoice::new();
+        let mut voice = GrainVoice::with_rate(sr);
+        // ao vivo: o sinal acaba `folga` depois da saida; metade para a janela do grao seguinte,
+        // metade para a do atual. Periodos maiores que isso passam sem correcao (limpos).
+        let fir = (super::breath::SPLIT_HALF_LIVE * sr as f64).ceil();
+        let room = latency as f64 - fir - 0.001 * sr as f64;
         if live {
-            voice.max_half = live_half * sr as f64;
+            voice.max_period = room - LIVE_FADE * sr as f64;
+        }
+        let live_plan = 0.5 * room;
+        if live {
+            voice.reach = live_plan;
         }
         Self {
             sr,
@@ -202,6 +213,8 @@ impl Engine {
             frame_count: 0,
             brain: Brain::new(sr, hop, lookahead),
             voice,
+            live_plan,
+            live_fir: fir as i64,
             breath: BreathSplit::with_fir(sr, b_past, b_fut, if live { super::breath::SPLIT_HALF_LIVE } else { super::breath::SPLIT_HALF }),
             wet: 1.0,
             air: 1.0,
@@ -358,21 +371,26 @@ impl Engine {
         // graos
         let tau_end = (n0 + n as i64 - lat) as f64;
         let until = tau_end + self.plan_ahead();
-        let mut voice = std::mem::take(&mut self.voice);
-        let mut breath = std::mem::take(&mut self.breath);
+        if self.mode == LatencyMode::Live {
+            // ultima amostra da origem ja separada neste bloco
+            self.voice.read_limit = (self.n_in - self.live_fir - 4) as f64;
+        }
         let split = self.params.breath_split;
         {
-            let ctl = Ctl { e: self };
+            // emprestimos separados de cada campo: nada de alocar ou mover estruturas no audio
+            let ctl = Ctl {
+                tl: Timeline { frames: &self.frames, count: self.frame_count, hop: self.hop, live: self.mode == LatencyMode::Live, starved: &self.starved_ctrl },
+                params: &self.params,
+                sr: self.sr,
+            };
             if split {
-                let mut src = Split { b: &mut breath, x: &self.input, marks: &self.marks, avail: self.n_in };
-                voice.plan(until, &mut src, &self.marks, &ctl, &self.hann);
+                let mut src = Split { b: &mut self.breath, x: &self.input, marks: &self.marks, avail: self.n_in };
+                self.voice.plan(until, &mut src, &self.marks, &ctl, &self.hann);
             } else {
-                voice.plan(until, &mut Plain(&self.input), &self.marks, &ctl, &self.hann);
+                self.voice.plan(until, &mut Plain(&self.input), &self.marks, &ctl, &self.hann);
             }
         }
-        breath.ensure(&self.input, &self.marks, tau_end as i64 + 1, self.n_in);
-        self.voice = voice;
-        self.breath = breath;
+        self.breath.ensure(&self.input, &self.marks, tau_end as i64 + 1, self.n_in);
 
         // saida: voz corrigida (mono) nos dois canais, mais o ar que passou ao lado do PSOLA;
         // bypass cruza para o seco atrasado
@@ -388,7 +406,7 @@ impl Engine {
             out_l[i] = wet * y + dry * self.dry_l.at(tau);
             out_r[i] = wet * y + dry * self.dry_r.at(tau);
         }
-        self.meter = self.frame_at(tau_end);
+        self.meter = self.timeline().frame_at(tau_end);
     }
 
     /// Quadros de controle ja decididos: (instante de origem, quadro), a partir do indice `k0`.
@@ -402,34 +420,49 @@ impl Engine {
     /// Quanto alem da saida os graos precisam ser planejados (a maior meia janela de saida).
     fn plan_ahead(&self) -> f64 {
         if self.mode == LatencyMode::Live {
-            self.voice.max_half / FORMANT_MIN as f64 + 4.0
+            self.live_plan
         } else {
             max_half_len(self.sr)
         }
     }
 
+    fn timeline(&self) -> Timeline<'_> {
+        Timeline { frames: &self.frames, count: self.frame_count, hop: self.hop, live: self.mode == LatencyMode::Live, starved: &self.starved_ctrl }
+    }
+}
+
+/// Os quadros de controle ja decididos, vistos pelo shifter e pelos medidores.
+struct Timeline<'a> {
+    frames: &'a [CtrlFrame],
+    count: u64,
+    hop: usize,
+    live: bool,
+    starved: &'a std::cell::Cell<u64>,
+}
+
+impl Timeline<'_> {
     fn frame_at(&self, t: f64) -> CtrlFrame {
-        if self.frame_count == 0 {
+        if self.count == 0 {
             return CtrlFrame::default();
         }
         let k = (t / self.hop as f64).floor().max(0.0) as u64;
-        let last = self.frame_count - 1;
-        let oldest = self.frame_count.saturating_sub(CTRL_CAP as u64 - 4);
+        let last = self.count - 1;
+        let oldest = self.count.saturating_sub(CTRL_CAP as u64 - 4);
         self.frames[(k.clamp(oldest, last) % CTRL_CAP as u64) as usize]
     }
 
     /// Deslocamento interpolado no instante `t`.
     fn shift_at(&self, t: f64) -> f32 {
-        if self.frame_count == 0 {
+        if self.count == 0 {
             return 0.0;
         }
         let x = (t / self.hop as f64).max(0.0);
-        let last = self.frame_count - 1;
+        let last = self.count - 1;
         // ao vivo o audio passa a frente das decisoes: vale a ultima (nao e fome)
-        if x > last as f64 + 1.0 && t > self.hop as f64 * 8.0 && self.mode != LatencyMode::Live {
-            self.starved_ctrl.set(self.starved_ctrl.get() + 1);
+        if x > last as f64 + 1.0 && t > self.hop as f64 * 8.0 && !self.live {
+            self.starved.set(self.starved.get() + 1);
         }
-        let oldest = self.frame_count.saturating_sub(CTRL_CAP as u64 - 4);
+        let oldest = self.count.saturating_sub(CTRL_CAP as u64 - 4);
         let k0 = (x.floor() as u64).clamp(oldest, last);
         let k1 = (k0 + 1).min(last);
         let f = (x - k0 as f64).clamp(0.0, 1.0) as f32;
@@ -464,18 +497,20 @@ impl GrainSource for Split<'_> {
 
 /// Visao do motor para o shifter.
 struct Ctl<'a> {
-    e: &'a Engine,
+    tl: Timeline<'a>,
+    params: &'a EngineParams,
+    sr: f32,
 }
 
 impl VoiceControl for Ctl<'_> {
     fn state(&self, s: f64, src_period: f32) -> VoiceState {
-        let formant = (self.e.params.throat * 0.3).exp2();
-        let hard = self.e.frame_at(s).hard_hz;
-        if hard > 0.0 && src_period > 0.0 && !self.e.params.bypass {
+        let formant = (self.params.throat * 0.3).exp2();
+        let hard = self.tl.frame_at(s).hard_hz;
+        if hard > 0.0 && src_period > 0.0 && !self.params.bypass {
             // alvo absoluto: o ciclo sai exatamente no periodo da nota
-            return VoiceState { ratio: hard * src_period / self.e.sr, formant };
+            return VoiceState { ratio: hard * src_period / self.sr, formant };
         }
-        VoiceState { ratio: (self.e.shift_at(s) / 12.0).exp2(), formant }
+        VoiceState { ratio: (self.tl.shift_at(s) / 12.0).exp2(), formant }
     }
 }
 

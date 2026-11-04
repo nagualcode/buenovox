@@ -425,11 +425,11 @@ impl BuenoGui {
         let auto = meter >= 10;
         let active = (meter % 10).checked_sub(1);
         let text = match (chosen, active) {
-            (3, Some(0)) if auto => "Auto: Live now (monitoring, 11 ms).".to_string(),
-            (3, Some(_)) if auto => "Auto: Studio now (playback/bounce).".to_string(),
-            (3, _) => "Auto: Live when monitoring, Studio on playback.".to_string(),
+            (3, Some(0)) if auto => "Auto: Live (14 ms). Bounce uses Studio.".to_string(),
+            (3, Some(_)) if auto => "Auto: Studio (bounce).".to_string(),
+            (3, _) => "Auto: Live in real time, Studio on bounce.".to_string(),
             (c, Some(a)) if c != a => "Restart playback or reload to apply.".to_string(),
-            (0, _) => "Live: 11 ms, for singing on stage.".to_string(),
+            (0, _) => "Live: 14 ms, for monitoring and stage.".to_string(),
             (1, _) => "Track: for recording with monitoring.".to_string(),
             _ => "Studio: sees each note before tuning it.".to_string(),
         };

@@ -86,21 +86,20 @@ Restart your DAW. In Live: *Plug-Ins → Audio Units → Jardim Sonoro → Bueno
    * **Pure Tuning**: just intonation relative to the lowest held MIDI note (or the tonic).
    * **A4**: reference from 415 to 466 Hz.
 9. **Latency**, reported to the host:
-   * **AUTO** (default): **Live** while you monitor (transport stopped or recording),
-     **Studio** when the track plays back or is bounced/exported. The host tells the plugin
-     whether it is playing, recording or rendering offline; both engines run side by side, the
-     switch crossfades in 30 ms and the latency reported to the host follows the active engine.
-     The host cannot tell the plugin whether its input is a live microphone, so monitoring while
-     the transport plays without recording gets Studio latency; pick **LIVE** for that.
-   * **LIVE** (**11 ms** at any sample rate): for singing on stage or monitoring. The audio does
+   * **AUTO** (default): **Live** in real time, always, so monitoring and singing along stay
+     at low latency whether or not the track is armed or recording. **Studio** only for a
+     bounce: the switch happens when the host prepares an offline render, so it can re-read the
+     latency. If a host starts rendering without preparing the plugin, Auto stays in Live: the
+     bounce stays aligned, at Live quality. To be sure of maximum quality on a bounce, pick
+     **STUDIO** by hand before exporting.
+   * **LIVE** (**14 ms** at any sample rate): for monitoring and singing on stage. The audio does
      not wait for the pitch detector:
-     * epoch marks are predicted from the real spacing of the previous cycle and confirmed by
-       correlation, which needs only ~0.7 period of signal ahead; when a mark arrives later than
-       its estimate, the synthesis grid takes the difference back on the next step, so it stays
-       locked to the voice;
-     * grains are capped at 3.5 ms on the future side; on the past side (which costs no
-       latency) the window reaches back to the previous grain with a flat top, so the windows
-       still sum to 1 and low voices keep their level;
+     * the read position follows the output with a continuous offset that only changes by what
+       the correction asks for. With no correction it is zero, so the output is the input;
+     * grains stop where the signal available ends: the crossfade to the next grain is a short
+       1.5 ms fade placed where both grains exist, and each stays at full level up to it;
+     * the breath split crossfades between averaging recipes when a new mark arrives;
+     * voices below 100 Hz (periods longer than the latency allows) pass cleanly, uncorrected;
      * note changes are detected from the past only, with shorter windows and transitions;
      * Hard divides by each cycle's real period, so its staircase stays sharp.
    * **TRACK** (~105 ms): for recording with monitoring when a little more context helps.
@@ -200,7 +199,7 @@ legato, a legato half step and rests:
 |---|---|---|
 | Natural / Studio | ≤ 2.1 cents | ≤ 1.5 cents |
 | Natural / Track | ≤ 4.0 cents | ≤ 3.6 cents |
-| Natural / Live (11 ms) | ≤ 3.7 cents | ≤ 4.9 cents |
+| Natural / Live (14 ms) | ≤ 3.7 cents | ≤ 4.9 cents |
 | Classic (120 ms retune) | ≤ 2.1 cents | ≤ 6.4 cents |
 | Hard (Studio and Live) | ≤ 2.0 cents | output held still: ≤ 0.3 cent deviation |
 
@@ -226,18 +225,20 @@ Other figures:
 
   | | Remaining error (median / 90%) | Expression changed (median) |
   |---|---|---|
-  | Natural / Studio | **5.8 / 22 cents** | 7.3 cents |
-  | Natural / Live | 11.6 / 36 cents | 18.8 cents |
-  | Hard / Live | 0.3 / 2.3 cents | (flattened by design) |
+  | Natural / Studio | **5.7 / 22 cents** | 7.4 cents |
+  | Natural / Live | 10.9 / 37 cents | 18.0 cents |
+  | Hard / Live | 0.3 / 2.9 cents | (flattened by design) |
 
   In Live, Natural only sees the past of each note, so it settles on the note later; Hard hits
   the note from its first frames.
 * **Large shifts** (a straight C4 retuned by MIDI from C3 to C5): level within 0.9 dB of the
-  input in Studio and 1.35 dB in Live, no clicks; spectral envelope (formants) within 0.6–2.2 dB
+  input in Studio and Live (0.9 dB), no clicks; spectral envelope (formants) within 0.6–2.2 dB
   RMS, not growing with the shift.
 * **Classic retune:** a note sung 40 cents flat goes 4.6 cents past the target and settles on it.
-* **PSOLA with no correction:** **87 dB** SNR against the dry signal in Studio and **98 dB** in
-  Live, with breath separation on (the waveform, not just the timbre).
+* **No correction, on real singing** (all 40 vocadito excerpts, voices from 119 to 349 Hz): the
+  output equals the input to **145 dB** in Live and Studio, at any buffer size from 64 to 1024.
+* **Clicks on real singing, with correction on:** single-sample spikes per minute match the dry
+  signal in every mode (0–5/min, dry 2–5/min), Natural and Hard, buffers from 64 to 512.
 * **Breath separation**, on a very breathy synthetic voice (harmonic-to-noise ratio 6 dB, 40-cent
   vibrato), each true component separated on its own with the mixture's recipe:
 
@@ -245,14 +246,13 @@ Other figures:
   |---|---|---|
   | Studio | −24 dB | −13 dB |
   | Track | −24 dB | −12 dB |
-  | Live | −24 dB | −10 dB |
+  | Live | −16 dB | −9 dB |
 
   Breathy voice shifted up 4 semitones by MIDI: the high-band harmonic-to-noise ratio measured on
   the output is 7.8 dB without separation (the air became periodic) and 6.0 dB with it, against
   5.6 dB on the input. **Breath** at 0% removes 12 dB of air; at 200% adds 5.6 dB.
-* **Live latency sweep** (identity without correction / Natural center error / low voice level):
-  18 ms 97 dB / 3.7 c / −0.04 dB; **11 ms 96 dB / 3.9 c / −0.3 dB**; 8 ms breaks low voices
-  (grains too short for their period).
+* **Live latency sweep on real singing:** 12 ms leaves voices under 125 Hz uncorrected (median
+  error 12.3 cents), 14 ms reaches 100 Hz (10.9 cents), 16 ms barely gains (10.6 cents).
 * **Live with large host buffers:** after a rest, the first marks of a note arrive after the grain
   plan has passed the onset; a bridging grain re-locks the plan to the marks (before this fix,
   with 512- or 1024-sample buffers the rest of the note came out up to 5 ms shifted).
@@ -264,9 +264,8 @@ Other figures:
 * **Pitch bend:** +0.5 st → 60.499.
 * **Robustness:** no data starvation at 44.1, 48 or 96 kHz in any mode; survives silence, noise,
   impulses, clipping and NaN.
-* **Performance:** in Studio with breath separation, ~53× real time at 48 kHz and ~31× at 96
-  kHz; Live ~82× at 48 kHz. Neural assist adds ~7 ms per second of audio (Studio 42×, Live 52×
-  at 48 kHz with everything on).
+* **Performance:** with everything on at 48 kHz, ~35× real time in Studio and ~47× in Live. The
+  audio path does not allocate.
 * **Validators:** passes **auval** (AU v2 and v3) and **pluginval** (VST3).
 
 ## Development

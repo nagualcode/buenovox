@@ -115,6 +115,9 @@ pub struct BreathSplit {
     k: u64,
     ra: Recipe,
     rb: Recipe,
+    /// Rampa de troca de receita (sem ciclos futuros): posicao e comprimento (amostras).
+    ramp: usize,
+    ramp_len: usize,
     /// Passa-baixas FIR simetrico (2*half+1 coeficientes).
     lp: Vec<f32>,
     half: i64,
@@ -162,6 +165,8 @@ impl BreathSplit {
             k: 0,
             ra: Recipe::NONE,
             rb: Recipe::NONE,
+            ramp: 0,
+            ramp_len: (0.001 * sr64) as usize,
             fir_in: vec![0.0; FIR_BLOCK + 2 * half as usize],
             fir_acc: vec![0.0; FIR_BLOCK],
             lp,
@@ -218,6 +223,39 @@ impl BreathSplit {
         }
         let latest = marks.latest_pos();
         let r0 = self.rdone;
+        // ao vivo (sem ciclos futuros) a marca seguinte nao existe quando a amostra e separada: a
+        // media passa de uma receita para a outra numa rampa curta, a partir do instante em que a
+        // marca nova chega. Um degrau aqui ficaria invisivel sem correcao (harmonica + ar somam a
+        // voz), mas com correcao as duas partes nao se cancelam mais e o degrau vira chiado.
+        if self.fut <= 0.0 {
+            if !force {
+                return;
+            }
+            while self.rdone < upto {
+                let s = self.rdone;
+                self.k = self.k.max(marks.oldest());
+                while self.k + 1 < count && marks.get(self.k + 1).pos <= s as f64 {
+                    self.k += 1;
+                }
+                if self.ra.k != self.k {
+                    self.rb = self.ra;
+                    self.ra = self.recipe(guide, marks, self.k);
+                    self.ramp = 0;
+                }
+                let h = if self.ramp < self.ramp_len {
+                    let u = self.ramp as f32 / self.ramp_len as f32;
+                    self.ramp += 1;
+                    let g = 0.5 - 0.5 * (std::f32::consts::PI * u).cos();
+                    g * self.ra.eval(x, s) + (1.0 - g) * self.rb.eval(x, s)
+                } else {
+                    self.ra.eval(x, s)
+                };
+                self.res.set(s, x.at(s) - h);
+                self.rdone += 1;
+            }
+            self.cut(x, r0);
+            return;
+        }
         while self.rdone < upto {
             let s = self.rdone;
             let sf = s as f64;
@@ -260,8 +298,12 @@ impl BreathSplit {
             self.res.set(s, x.at(s) - h);
             self.rdone += 1;
         }
-        // corte: ruido = residuo - passa-baixas(residuo), centrado. Em blocos contiguos, com o
-        // laco interno sobre as amostras (vetoriza)
+        self.cut(x, r0);
+    }
+
+    /// Corte: ruido = residuo - passa-baixas(residuo), centrado. Em blocos contiguos, com o laco
+    /// interno sobre as amostras (vetoriza).
+    fn cut(&mut self, x: &Ring, r0: i64) {
         let half = self.half;
         let hu = half as usize;
         let mut s0 = (r0 - half).max(0);
@@ -418,6 +460,8 @@ impl Default for BreathSplit {
             k: 0,
             ra: Recipe::NONE,
             rb: Recipe::NONE,
+            ramp: 0,
+            ramp_len: 1,
             lp: Vec::new(),
             half: 0,
             fir_in: Vec::new(),

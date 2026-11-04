@@ -1,7 +1,7 @@
 uuid = "685d4f61-7c0d-4b76-9eb7-3539d6e4ad3a"
 name = "Live Stage"
 category = "Natural"
-comment = "Singing on stage: fixed Live latency (11 ms), quick but natural."
+comment = "Singing on stage: fixed Live latency (14 ms), quick but natural."
 
 [params]
 style = 0

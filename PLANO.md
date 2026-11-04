@@ -15,20 +15,20 @@
 | F2 Síntese | PSOLA por razão: preserva o jitter e trava as marcas. Meias janelas assimétricas (distância real até as marcas vizinhas): sem correção, 87 dB (Studio) e 98 dB (Live) contra o seco. Separação harmônico + ar (média de ciclos realinhados, corte FIR de fase linear em 1 kHz): fantasma −24 dB, ar que fica na parte corrigida −13 dB (Studio) numa voz com HNR de 6 dB. Falta a pré-distorção cepstral e refazer o pulsar do ar no ritmo dos ciclos novos. |
 | F3 Cérebro v1 | Classic e Hard, MIDI Target, MIDI Scale, pitch bend, entonação pura. |
 | F4 Cérebro v2 | Natural: segmentação por movimento, centro curto, altura percebida e deslocamento por nota. Erro de centro ≤ 2,1 cents e expressão ≤ 1,5 cent no sintético. Em canto real (vocadito, 1.339 notas anotadas como alvo): erro mediano 5,8 cents no Studio e 11,6 no Live (o cantor erra 25). Transições medidas em 2.454 passos do VocalSet (overshoot 15–19% em passos pequenos, ζ 0,47–0,63) e usadas no retune do Classic. Centro percebido e prior melódico medidos e deixados de lado (as anotações guardam a média e a nota cantada, não a percepção nem a intenção). Falta o MUSHRA. |
-| F5+ Latência | Live em 11 ms (era 18): a síntese devolve o erro do período estimado, grãos de 3,5 ms com janela de topo plano no lado do passado, FIR da separação de 1,5 ms. Modo Auto (padrão): Live ao monitorar (parado ou gravando), Studio na reprodução e no bounce, com os dois motores em paralelo. Presets de fábrica, teclado de notas na interface, transcrição para MIDI no CLI. |
+| F5+ Latência | Live em 14 ms: leitura com deslocamento contínuo (sem correção a saída é a entrada, 145 dB em voz real), passagem curta entre grãos onde o sinal existe, rampa na troca de receita da separação; vozes abaixo de 100 Hz passam limpas sem correção. Os 11 ms da 0.3 chiavam em voz grave real: foram validados só no sintético. Modo Auto (padrão): Live em tempo real, Studio só quando o host prepara um bounce. Presets de fábrica, teclado de notas na interface, transcrição para MIDI no CLI. |
 | F5 Plugin | AU, VST3 e CLAP com gráfico de afinação. auval e pluginval passam. O clap-validator falha nos 3 testes de reprodutibilidade de estado, mas os exemplos oficiais do truce 6.3 (Gain, SysEx Echo) falham nos mesmos 3: é do framework. |
 | F6–F8 | Não iniciadas. |
 
 Diferenças em relação à §3.6: por enquanto um crate só (`src/dsp/` sem dependência de
 framework, como no Heaven) em vez de um workspace.
 
-Latências: **Live 18 ms**, Track ~95 ms, Studio ~270 ms. No Live:
+Latências: **Live 14 ms**, Track ~105 ms, Studio ~270 ms. No Live:
 * as marcas de época são previstas pelo espaçamento real do ciclo anterior e confirmadas por
   correlação;
 * os grãos ficam limitados a 5 ms;
 * as decisões de nota chegam ~30 ms depois do som.
 
-Natural/Live: erro de centro ≤ 3,7 cents e expressão ≤ 4,9 cents.
+Natural/Live: erro de centro ≤ 3,7 cents e expressão ≤ 4,9 cents no sintético; 10,9 cents de erro mediano em canto real.
 
 ---
 

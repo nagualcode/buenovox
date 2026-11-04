@@ -64,7 +64,7 @@ pub mod truce_integration {
         #[name = "Live"] V0,
         #[name = "Track"] V1,
         #[name = "Studio"] V2,
-        /// Live ao monitorar (transporte parado ou gravando), Studio na reproducao e no bounce.
+        /// Live em tempo real (monitor e reproducao), Studio so no bounce.
         #[name = "Auto"] V3,
     }
 
@@ -149,9 +149,8 @@ pub mod truce_integration {
         }
     }
 
-    /// Dois motores: o ao vivo e o de mixagem (Track ou Studio). Num modo fixo so um trabalha; no
-    /// Auto os dois recebem a mesma entrada o tempo todo e a saida (e a latencia informada ao host)
-    /// vem do que a situacao pede, com um cruzamento curto na troca.
+    /// Dois motores: o ao vivo e o de mixagem (Track ou Studio); so um trabalha de cada vez.
+    /// No Auto vale o ao vivo em tempo real e o Studio quando o host prepara um bounce.
     pub struct BuenoDsp {
         live: Engine,
         mix: Engine,
@@ -159,15 +158,10 @@ pub mod truce_integration {
         choice: Option<LatencyMode>,
         /// Motor que esta na saida.
         active: LatencyMode,
-        /// Cruzamento da troca: 1 = so o ativo.
-        fade: f32,
-        prev: LatencyMode,
         in_l: Vec<f32>,
         in_r: Vec<f32>,
         out_l: Vec<f32>,
         out_r: Vec<f32>,
-        alt_l: Vec<f32>,
-        alt_r: Vec<f32>,
     }
 
     impl Default for BuenoDsp {
@@ -186,29 +180,16 @@ pub mod truce_integration {
                 mix: Engine::new(sr, mix_mode),
                 choice,
                 active,
-                fade: 1.0,
-                prev: active,
                 in_l: vec![0.0; 4096],
                 in_r: vec![0.0; 4096],
                 out_l: vec![0.0; 4096],
                 out_r: vec![0.0; 4096],
-                alt_l: vec![0.0; 4096],
-                alt_r: vec![0.0; 4096],
             }
         }
 
         fn engine(&self, m: LatencyMode) -> &Engine { if m == LatencyMode::Live { &self.live } else { &self.mix } }
 
         fn engine_mut(&mut self, m: LatencyMode) -> &mut Engine { if m == LatencyMode::Live { &mut self.live } else { &mut self.mix } }
-
-        /// Quais motores precisam trabalhar neste bloco.
-        fn running(&self) -> (bool, bool) {
-            match self.choice {
-                None => (true, true),
-                Some(LatencyMode::Live) => (true, false),
-                Some(_) => (false, true),
-            }
-        }
     }
 
     pub struct BuenoVox;
@@ -226,12 +207,18 @@ pub mod truce_integration {
             if (state.live.sample_rate() - config.sample_rate as f32).abs() > 0.5 || state.choice != choice {
                 *state = BuenoDsp::new(config.sample_rate as f32, choice);
             }
-            if choice.is_none() && config.process_mode.is_offline() {
-                state.active = LatencyMode::Studio;
-                state.prev = LatencyMode::Studio;
+            // Auto: a troca so acontece aqui, com o host preparando o audio e relendo a latencia.
+            // Trocar no meio do processamento arriscaria a voz sair fora do lugar no arquivo
+            // final, se o host nao refizesse a compensacao.
+            if choice.is_none() {
+                let bounce = config.process_mode.is_offline();
+                if bounce {
+                    state.mix = Engine::new(config.sample_rate as f32, LatencyMode::Studio);
+                }
+                state.active = if bounce { LatencyMode::Studio } else { LatencyMode::Live };
             }
             let max_blk = config.max_block_size.max(4096);
-            for v in [&mut state.in_l, &mut state.in_r, &mut state.out_l, &mut state.out_r, &mut state.alt_l, &mut state.alt_r] {
+            for v in [&mut state.in_l, &mut state.in_r, &mut state.out_l, &mut state.out_r] {
                 v.resize(max_blk, 0.0);
             }
         }
@@ -246,46 +233,28 @@ pub mod truce_integration {
             ctx: &mut ProcessContext,
         ) -> ProcessStatus {
             let n = buffer.num_samples();
-            // Auto: o host diz se esta renderizando (bounce), tocando ou gravando. Parado ou
-            // gravando, o que entra e a voz ao vivo no monitor: latencia minima. Tocando sem gravar
-            // (a faixa gravada) ou exportando: o cerebro ve a nota inteira antes de corrigir.
-            if state.choice.is_none() {
-                let tr = ctx.transport;
-                let want = if ctx.process_mode.is_offline() || (tr.playing && !tr.recording) { LatencyMode::Studio } else { LatencyMode::Live };
-                if want != state.active {
-                    state.prev = state.active;
-                    state.active = want;
-                    state.fade = 0.0;
-                }
-            }
             let ep = params.engine_params();
-            let (run_live, run_mix) = state.running();
-            for (on, m) in [(run_live, LatencyMode::Live), (run_mix, LatencyMode::Studio)] {
-                if !on {
-                    continue;
-                }
-                let e = state.engine_mut(m);
-                e.set_params(&ep);
-                // MIDI: os eventos entram na linha do tempo com o deslocamento exato no bloco
-                for event in events.iter() {
-                    let at = (event.sample_offset as usize).min(n);
-                    match &event.body {
-                        EventBody::NoteOn { note, velocity, .. } => {
-                            if *velocity > 0 {
-                                e.note_on(at, *note);
-                            } else {
-                                e.note_off(at, *note);
-                            }
+            let active = state.active;
+            let e = state.engine_mut(active);
+            e.set_params(&ep);
+            // MIDI: os eventos entram na linha do tempo com o deslocamento exato no bloco
+            for event in events.iter() {
+                let at = (event.sample_offset as usize).min(n);
+                match &event.body {
+                    EventBody::NoteOn { note, velocity, .. } => {
+                        if *velocity > 0 {
+                            e.note_on(at, *note);
+                        } else {
+                            e.note_off(at, *note);
                         }
-                        EventBody::NoteOff { note, .. } => e.note_off(at, *note),
-                        EventBody::PitchBend { value, .. } => e.pitch_bend(at, (f32::from((*value).min(16383)) - 8192.0) / 8192.0),
-                        EventBody::ControlChange { cc, .. } if *cc == 123 || *cc == 120 => e.all_notes_off(at),
-                        _ => {}
                     }
+                    EventBody::NoteOff { note, .. } => e.note_off(at, *note),
+                    EventBody::PitchBend { value, .. } => e.pitch_bend(at, (f32::from((*value).min(16383)) - 8192.0) / 8192.0),
+                    EventBody::ControlChange { cc, .. } if *cc == 123 || *cc == 120 => e.all_notes_off(at),
+                    _ => {}
                 }
             }
 
-            let fade_step = 1.0 / (0.03 * ctx.sample_rate as f32).max(1.0);
             let mut peaks = [0.0f32; 2];
             let mut pos = 0;
             while pos < n {
@@ -302,25 +271,10 @@ pub mod truce_integration {
                     state.in_l[..m].fill(0.0);
                     state.in_r[..m].fill(0.0);
                 }
-                // o motor ativo escreve em out_*, o outro (se trabalha) em alt_*
-                let active_is_live = state.active == LatencyMode::Live;
                 {
-                    let BuenoDsp { live, mix, in_l, in_r, out_l, out_r, alt_l, alt_r, .. } = &mut *state;
-                    let (il, ir) = (&in_l[..m], &in_r[..m]);
-                    let (a, b) = if active_is_live { (live, mix) } else { (mix, live) };
-                    a.process(il, ir, &mut out_l[..m], &mut out_r[..m]);
-                    if (active_is_live && run_mix) || (!active_is_live && run_live) {
-                        b.process(il, ir, &mut alt_l[..m], &mut alt_r[..m]);
-                    }
-                }
-                // troca no Auto: cruzamento de 30 ms do motor anterior para o novo
-                if state.fade < 1.0 {
-                    for i in 0..m {
-                        state.fade = (state.fade + fade_step).min(1.0);
-                        let g = state.fade;
-                        state.out_l[i] = g * state.out_l[i] + (1.0 - g) * state.alt_l[i];
-                        state.out_r[i] = g * state.out_r[i] + (1.0 - g) * state.alt_r[i];
-                    }
+                    let BuenoDsp { live, mix, in_l, in_r, out_l, out_r, .. } = &mut *state;
+                    let e = if active == LatencyMode::Live { live } else { mix };
+                    e.process(&in_l[..m], &in_r[..m], &mut out_l[..m], &mut out_r[..m]);
                 }
                 let pk = |s: &[f32]| s.iter().fold(0.0f32, |a, &x| a.max(x.abs()));
                 peaks[0] = peaks[0].max(pk(&state.in_l[..m]).max(pk(&state.in_r[..m])));

@@ -4,7 +4,7 @@
 //!   style=natural|classic|hard  source=scale|miditarget|midiscale  key=C..B  scale=major|minor|...
 //!   amount=0..1  speed=ms  flex=0..1  humanize=0..1  tighten=0..1  vibrato=0..2  create=0..1
 //!   scoop=0..1  throat=-1..1  breath=0..2  split=0|1  neural=0|1  pure=0|1  a4=Hz  latency=live|track|studio
-//!   block=512
+//!   block=512  live=ms (latencia do modo ao vivo)
 //!   midi="0-2:60;2-4:62,65"   notas MIDI seguradas por intervalo de tempo (segundos)
 //!   dump=curvas.csv           tempo, altura de entrada, alvo, saida, deslocamento (por quadro)
 //!   compensate=1              remove a latencia do arquivo de saida (padrao 1)
@@ -299,6 +299,7 @@ fn main() {
     let mut dump: Option<String> = None;
     let mut mid: Option<String> = None;
     let mut compensate = true;
+    let mut live_ms: Option<f64> = None;
     for a in &args[2..] {
         let (k, v) = a.split_once('=').expect("use chave=valor");
         let f = || v.parse::<f32>().expect("numero");
@@ -343,6 +344,7 @@ fn main() {
                 }
             }
             "block" => block = v.parse().unwrap(),
+            "live" => live_ms = Some(v.parse().unwrap()),
             "midi" => midi = parse_midi(v),
             "dump" => dump = Some(v.to_string()),
             "mid" => mid = Some(v.to_string()),
@@ -351,7 +353,10 @@ fn main() {
         }
     }
 
-    let mut e = Engine::new(sr as f32, mode);
+    let mut e = match live_ms {
+        Some(ms) => Engine::with_live(sr as f32, mode, ms / 1000.0),
+        None => Engine::new(sr as f32, mode),
+    };
     let lat = e.latency();
     let n = in_l.len();
     let total = n + if compensate { lat } else { 0 };
