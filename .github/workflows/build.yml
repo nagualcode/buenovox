@@ -1,0 +1,126 @@
+# Builds and tests BuenoVOX on macOS, Windows and Linux.
+#
+# - Every push to main and every pull request: test + build the bundles
+#   (downloadable from the run page as workflow artifacts).
+# - Pushing a tag v*: also attaches the zipped bundles to the GitHub
+#   release for that tag (created if it does not exist yet).
+
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_TRUCE_VERSION: 6.3.0
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS (Apple Silicon)
+            os: macos-14
+            slug: macOS-arm64
+            formats: --au2 --vst3 --clap
+            cpu: ""
+          - name: Windows (x64)
+            os: windows-latest
+            slug: Windows-x64
+            formats: --vst3 --clap
+            # x86-64-v2 (SSE4.2): runs on any x64 CPU from ~2009 on;
+            # cargo-truce's default v3 needs AVX2.
+            cpu: --target-cpu v2
+          - name: Linux (x64)
+            # 22.04 (glibc 2.35) so the plugin also loads on older distros.
+            os: ubuntu-22.04
+            slug: Linux-x64
+            formats: --vst3 --clap
+            cpu: --target-cpu v2
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+          cache-bin: false
+
+      - name: Linux system packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libx11-dev libx11-xcb-dev libxcb1-dev libxcb-dri2-0-dev libxcb-icccm4-dev libxcursor-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxrandr-dev \
+            libgl1-mesa-dev libegl1-mesa-dev libvulkan-dev \
+            libwayland-dev libasound2-dev libjack-jackd2-dev \
+            libfontconfig1-dev libfreetype-dev libdbus-1-dev
+
+      # The ruler: DSP only, so it runs the same on every OS. The regua profile
+      # keeps unwinding on (the test harness needs it; release uses panic=abort).
+      - name: Test
+        shell: bash
+        run: cargo test --profile regua --no-default-features
+
+      - name: Install cargo-truce
+        shell: bash
+        run: cargo install cargo-truce --version "$CARGO_TRUCE_VERSION" --locked
+
+      - name: Build bundles
+        shell: bash
+        run: cargo truce build ${{ matrix.formats }} ${{ matrix.cpu }}
+
+      - name: Package
+        id: pkg
+        shell: bash
+        run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          NAME="BuenoVOX-${VERSION}-${{ matrix.slug }}"
+          mkdir -p "dist/$NAME"
+          for b in target/bundles/BuenoVOX.*; do cp -R "$b" "dist/$NAME/"; done
+          cp README.md "dist/$NAME/"
+          cd dist
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a -tzip "$NAME.zip" "$NAME" >/dev/null
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            # ditto keeps the bundles' code signatures intact.
+            ditto -c -k --keepParent "$NAME" "$NAME.zip"
+          else
+            zip -qr "$NAME.zip" "$NAME"
+          fi
+          ls -la
+          echo "zip=dist/$NAME.zip" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: ${{ steps.pkg.outputs.zip }}
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "BuenoVOX ${TAG#v}" --generate-notes || true
+          gh release upload "$TAG" "${{ steps.pkg.outputs.zip }}" --clobber

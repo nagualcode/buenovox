@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "buenovox"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "clap-sys",
  "egui",

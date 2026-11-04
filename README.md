@@ -2,7 +2,7 @@
 
 **Natural vocal pitch correction (auto + MIDI), written in Rust with the
 [truce](https://github.com/truce-audio/truce) framework.** AU, VST3 and CLAP for macOS
-(Apple Silicon).
+(Apple Silicon); VST3 and CLAP for Windows and Linux (x64).
 
 A research project for personal, non-commercial use and the study of the craft. The full plan
 (state of the art, patents, roadmap) lives in [PLANO.md](PLANO.md) (Portuguese).
@@ -18,17 +18,30 @@ the air in the voice.
 
 ---
 
-## Installation (release, Audio Unit, Apple Silicon)
+## Installation (release)
 
-1. Download `BuenoVOX-<version>-AU-macOS-arm64.zip` from
-   [Releases](https://github.com/nagualcode/buenovox/releases) and unzip it.
-2. Move `BuenoVOX.component` to `~/Library/Audio/Plug-Ins/Components/`.
-3. The build is ad-hoc signed (no Apple developer certificate), so clear the quarantine flag:
+Download the zip for your system from
+[Releases](https://github.com/nagualcode/buenovox/releases) and unzip it.
+
+**macOS (Apple Silicon)**, `BuenoVOX-<version>-macOS-arm64.zip`:
+
+1. Move `BuenoVOX.component` to `~/Library/Audio/Plug-Ins/Components/`. VST3 and CLAP go to
+   `~/Library/Audio/Plug-Ins/VST3/` and `~/Library/Audio/Plug-Ins/CLAP/`.
+2. The build is ad-hoc signed (no Apple developer certificate), so clear the quarantine flag:
    ```bash
    xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/BuenoVOX.component
    ```
-4. Restart your DAW (in Logic, the plugin manager rescans it; `auval -v aumf BVox JdSn` checks
-   it from the terminal).
+3. Restart your DAW (`auval -v aumf BVox JdSn` checks it from the terminal).
+
+**Windows (x64)**, `BuenoVOX-<version>-Windows-x64.zip`: copy `BuenoVOX.vst3` to
+`C:\Program Files\Common Files\VST3\` and `BuenoVOX.clap` to
+`C:\Program Files\Common Files\CLAP\`, then rescan plugins in your DAW. The build is unsigned,
+so Windows may warn about it.
+
+**Linux (x64)**, `BuenoVOX-<version>-Linux-x64.zip`: copy `BuenoVOX.vst3` to `~/.vst3/` and
+`BuenoVOX.clap` to `~/.clap/`, then rescan plugins in your DAW.
+
+The Windows and Linux builds are compiled and tested by CI; they have not been tried in a DAW yet.
 
 ## Installation (from source)
 
@@ -269,6 +282,9 @@ Other figures:
 * **Validators:** passes **auval** (AU v2 and v3) and **pluginval** (VST3).
 
 ## Development
+
+Every push builds and tests macOS, Windows and Linux bundles
+(`.github/workflows/build.yml`); pushing a tag `v*` attaches them to that release.
 
 ```bash
 cargo test --profile regua --no-default-features            # the ruler
