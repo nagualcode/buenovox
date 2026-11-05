@@ -4,7 +4,7 @@
 [truce](https://github.com/truce-audio/truce) framework.** AU, VST3 and CLAP for macOS
 (Apple Silicon); VST3 and CLAP for Windows and Linux (x64).
 
-A research project for personal, non-commercial use and the study of the craft. The full plan
+A research project and a study of the craft. The full plan
 (state of the art, patents, roadmap) lives in [PLANO.md](PLANO.md) (Portuguese).
 
 ![Interface](docs/gui.png)
@@ -40,6 +40,9 @@ so Windows may warn about it.
 
 **Linux (x64)**, `BuenoVOX-<version>-Linux-x64.zip`: copy `BuenoVOX.vst3` to `~/.vst3/` and
 `BuenoVOX.clap` to `~/.clap/`, then rescan plugins in your DAW.
+
+On Windows and Linux, the factory presets are for the CLAP: copy the `BuenoVOX.presets` folder
+into the same folder as `BuenoVOX.clap`. The VST3 in these zips has no factory presets.
 
 The Windows and Linux builds are compiled and tested by CI; they have not been tried in a DAW yet.
 
@@ -331,4 +334,23 @@ input pitch, target, output, shift, vibrato, note center, local center and ancho
   detector's window must span 32 ms to see periods down to 62 Hz; shortening it to the
   singer's range changes the frame structure the whole brain relies on.
 
-License: MIT or Apache-2.0.
+## License
+
+BuenoVOX is released under [MIT-0](LICENSE): use, change, sell or redistribute it, with or
+without credit. No warranty.
+
+That license covers this project only:
+
+* **Dependencies** keep their own licenses. Most are MIT, Apache-2.0, BSD or Zlib.
+  [truce](https://github.com/truce-audio/truce) uses the Truce License 1.0, which is MIT or
+  Apache-2.0 for audio plugins, including commercial ones. Anyone redistributing binaries must
+  carry those notices.
+* **Patents:** MIT-0 grants no patent rights. The project was built from published research for
+  non-commercial study, and no patent review was done for commercial use (see section 2.5 of
+  [PLANO.md](PLANO.md)).
+* **Training data:** the embedded network was trained on
+  [VocalSet](https://zenodo.org/records/1442513) (Wilkins, Seetharaman, Wahl and Pardo, CC BY
+  4.0) with labels from CREPE (MIT), and tested on
+  [vocadito](https://zenodo.org/records/5578807) (Bittner, Pasalo, Bosch, Meseguer Brocal and
+  Rubinstein, CC BY 4.0). Those datasets are not in this repository; they are credited here
+  because the weights were derived from them.

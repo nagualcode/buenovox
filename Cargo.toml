@@ -3,7 +3,7 @@ name = "buenovox"
 version = "0.3.1"
 edition = "2021"
 description = "BuenoVOX: correcao de afinacao vocal natural em Rust (truce)"
-license = "MIT OR Apache-2.0"
+license = "MIT-0"
 
 [lib]
 name = "buenovox"

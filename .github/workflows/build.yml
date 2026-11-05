@@ -96,7 +96,7 @@ jobs:
           NAME="BuenoVOX-${VERSION}-${{ matrix.slug }}"
           mkdir -p "dist/$NAME"
           for b in target/bundles/BuenoVOX.*; do cp -R "$b" "dist/$NAME/"; done
-          cp README.md "dist/$NAME/"
+          cp README.md LICENSE "dist/$NAME/"
           cd dist
           if [ "$RUNNER_OS" = "Windows" ]; then
             7z a -tzip "$NAME.zip" "$NAME" >/dev/null

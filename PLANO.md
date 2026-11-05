@@ -230,7 +230,9 @@ atos com finalidade experimental ligados a estudo ou pesquisa. Mesmo assim:
 * **não reproduzimos reivindicações** de patentes ativas;
 * documentamos de onde vem cada ideia, como o Heaven fez.
 
-Se um dia o objetivo mudar, isso precisa de revisão jurídica de verdade.
+A licença MIT-0 do código não concede direitos de patente nem muda esta postura: quem usar o
+projeto comercialmente responde por essa análise. Se um dia o objetivo mudar, isso precisa de
+revisão jurídica de verdade.
 
 ---
 
@@ -530,7 +532,7 @@ Princípio herdado do Heaven: soar bem logo de cara.
 | Vozes extremas (fry, belt, rap, soprosidade) | VocalSet na régua desde a F1; árbitro neural; separação de ruído. |
 | Sem ARA, sem edição global | MIDI como editor e transcrição para `.mid` pelo CLI. Acompanhar o truce; ARA pode virar contribuição upstream. |
 | CPU das redes no áudio | Redes ≤ 100–200 k parâmetros, kernels próprios, medição no CI. |
-| Licenças | Só dependências MIT/Apache/BSD. GPL e AGPL (OpenVoxTuner, Rubber Band, Autotalent) apenas como leitura. |
+| Licenças | Código do projeto em MIT-0. Dependências permissivas (MIT/Apache/BSD/Zlib e a Truce License 1.0, que equivale a MIT/Apache para plugins). GPL e AGPL (OpenVoxTuner, Rubber Band, Autotalent) apenas como leitura. |
 | Patentes | §2.5: implementação a partir de literatura acadêmica, sem copiar reivindicações, uso não comercial. |
 
 ---
